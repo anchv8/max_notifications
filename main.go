@@ -46,6 +46,10 @@ func main() {
 			chatID := u.Message.Recipient.ChatId
 			log.Printf("[MSG] userId=%d text=%q", userID, text)
 
+			if text == "" {
+				break
+			}
+
 			err := api.Messages.Send(
 				ctx,
 				maxbot.NewMessage().SetChat(chatID).SetText(text),
