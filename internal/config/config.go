@@ -57,6 +57,9 @@ func Load() (*Config, error) {
 	if cfg.IMAPPassword == "" {
 		return nil, fmt.Errorf("IMAP_PASSWORD не задан")
 	}
+	if cfg.IMAPPort == "" {
+		return nil, fmt.Errorf("IMAP_PORT не задан")
+	}
 	if cfg.DBPath == "" {
 		cfg.DBPath = "./data/bot.db"
 	}
