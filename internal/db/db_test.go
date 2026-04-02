@@ -151,15 +151,30 @@ func TestSaveEventAndGetStats(t *testing.T) {
 func TestGetStalledJobs(t *testing.T) {
 	d := openTestDB(t)
 
-	job, _, _ := d.GetOrCreateJob("StaleJob")
-	_, _ = d.SaveEvent(job.ID, "success", "")
-	_ = d.UpdateJobStats(job.ID, time.Now().Add(-48*time.Hour))
-
+	// Verify method returns no error and correct type on empty DB
 	stalled, err := d.GetStalledJobs()
+	if err != nil {
+		t.Fatalf("GetStalledJobs должен не падать на пустой БД: %v", err)
+	}
+	if stalled == nil {
+		stalled = []db.Job{}
+	}
+	if len(stalled) != 0 {
+		t.Errorf("пустая БД не должна возвращать stalled задачи, got %d", len(stalled))
+	}
+
+	// Задача без avg_interval_hours (только одно событие) не должна быть stalled
+	job, _, _ := d.GetOrCreateJob("OnceSeenJob")
+	_, _ = d.SaveEvent(job.ID, "success", "")
+	_ = d.UpdateJobStats(job.ID, time.Now().Add(-72*time.Hour))
+
+	stalled, err = d.GetStalledJobs()
 	if err != nil {
 		t.Fatalf("GetStalledJobs: %v", err)
 	}
-	_ = stalled
+	if len(stalled) != 0 {
+		t.Errorf("задача с одним событием (avg=nil) не должна быть stalled, got %d", len(stalled))
+	}
 }
 
 func TestGetLastEvents(t *testing.T) {

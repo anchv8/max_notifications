@@ -3,13 +3,14 @@ module max-echo-bot
 go 1.26.1
 
 require (
+	github.com/emersion/go-imap/v2 v2.0.0-beta.8
 	github.com/joho/godotenv v1.5.1
 	github.com/max-messenger/max-bot-api-client-go v1.6.8
+	modernc.org/sqlite v1.48.0
 )
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/emersion/go-imap/v2 v2.0.0-beta.8 // indirect
 	github.com/emersion/go-message v0.18.2 // indirect
 	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6 // indirect
 	github.com/google/uuid v1.6.0 // indirect
@@ -23,5 +24,4 @@ require (
 	modernc.org/libc v1.70.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.48.0 // indirect
 )

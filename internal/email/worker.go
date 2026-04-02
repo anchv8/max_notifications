@@ -2,8 +2,12 @@ package email
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
+	"io"
 	"log"
+	"mime/quotedprintable"
+	"strings"
 	"time"
 
 	"github.com/emersion/go-imap/v2"
@@ -82,7 +86,7 @@ func (w *Worker) poll(ctx context.Context) {
 	log.Printf("[EMAIL] найдено %d непрочитанных писем", len(uids))
 
 	uidSet := imap.UIDSetNum(uids...)
-	bodySection := &imap.FetchItemBodySection{}
+	bodySection := &imap.FetchItemBodySection{Specifier: imap.PartSpecifierText}
 	messages, err := c.Fetch(uidSet, &imap.FetchOptions{
 		UID:         true,
 		Envelope:    true,
@@ -100,7 +104,18 @@ func (w *Worker) poll(ctx context.Context) {
 
 		subject := msg.Envelope.Subject
 		bodyBytes := msg.FindBodySection(bodySection)
-		body := string(bodyBytes)
+		body := decodeBody(bodyBytes, msg)
+
+		// Пометить письмо как прочитанное ДО сохранения в БД,
+		// чтобы избежать дублирования при краше после сохранения.
+		storeUID := imap.UIDSetNum(msg.UID)
+		if err := c.Store(storeUID, &imap.StoreFlags{
+			Op:     imap.StoreFlagsAdd,
+			Flags:  []imap.Flag{imap.FlagSeen},
+			Silent: true,
+		}, nil).Close(); err != nil {
+			log.Printf("[EMAIL] ошибка пометки письма как прочитанного: %v", err)
+		}
 
 		status := ParseStatus(body)
 		message := TruncateMessage(body, 500)
@@ -128,15 +143,21 @@ func (w *Worker) poll(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		}
-
-		// Пометить письмо как прочитанное
-		storeUID := imap.UIDSetNum(msg.UID)
-		if err := c.Store(storeUID, &imap.StoreFlags{
-			Op:     imap.StoreFlagsAdd,
-			Flags:  []imap.Flag{imap.FlagSeen},
-			Silent: true,
-		}, nil).Close(); err != nil {
-			log.Printf("[EMAIL] ошибка пометки письма как прочитанного: %v", err)
-		}
 	}
+}
+
+func decodeBody(raw []byte, _ *imapclient.FetchMessageBuffer) string {
+	// Try quoted-printable first (most common for HTML emails)
+	qpReader := quotedprintable.NewReader(strings.NewReader(string(raw)))
+	decoded, err := io.ReadAll(qpReader)
+	if err == nil && len(decoded) > 0 {
+		return string(decoded)
+	}
+	// Try base64
+	b64decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(raw)))
+	if err == nil && len(b64decoded) > 0 {
+		return string(b64decoded)
+	}
+	// Return as-is
+	return string(raw)
 }

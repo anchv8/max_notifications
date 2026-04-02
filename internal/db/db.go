@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -371,15 +372,16 @@ func (d *DB) ListAllJobs() ([]Job, error) {
 
 func (d *DB) GetStalledJobs() ([]Job, error) {
 	rows, err := d.conn.Query(`
-		SELECT id, job_name, org_id, last_seen_at, avg_interval_hours, registered_at
-		FROM jobs
-		WHERE avg_interval_hours IS NOT NULL
-		  AND last_seen_at IS NOT NULL
-		  AND (julianday('now') - julianday(last_seen_at)) * 24 > avg_interval_hours * 2
-		  AND id NOT IN (
-			SELECT DISTINCT job_id FROM backup_events
-			WHERE status = 'missed'
-			  AND (julianday('now') - julianday(received_at)) * 24 < avg_interval_hours * 2
+		SELECT j.id, j.job_name, j.org_id, j.last_seen_at, j.avg_interval_hours, j.registered_at
+		FROM jobs j
+		WHERE j.avg_interval_hours IS NOT NULL
+		  AND j.last_seen_at IS NOT NULL
+		  AND (julianday('now') - julianday(j.last_seen_at)) * 24 > j.avg_interval_hours * 2
+		  AND NOT EXISTS (
+			SELECT 1 FROM backup_events be
+			WHERE be.job_id = j.id
+			  AND be.status = 'missed'
+			  AND (julianday('now') - julianday(be.received_at)) * 24 < j.avg_interval_hours * 2
 		  )
 	`)
 	if err != nil {
@@ -546,12 +548,13 @@ func parseTime(s string) time.Time {
 		"2006-01-02 15:04:05",
 		"2006-01-02T15:04:05Z",
 		"2006-01-02T15:04:05",
-		time.RFC3339,
+		"2006-01-02",
 	}
 	for _, f := range formats {
 		if t, err := time.Parse(f, s); err == nil {
 			return t
 		}
 	}
+	log.Printf("[DB] не удалось распарсить время %q, возвращаю zero time", s)
 	return time.Time{}
 }
