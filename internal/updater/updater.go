@@ -52,8 +52,8 @@ func CheckLatestVersion(ctx context.Context) (string, error) {
 }
 
 // Update скачивает новый бинарник и запускает bat-скрипт замены.
-// После вызова процесс должен завершиться.
-func Update(ctx context.Context, currentVersion string) error {
+// isService=true — перезапуск через sc stop/start, иначе — прямой запуск exe.
+func Update(ctx context.Context, currentVersion string, isService bool, serviceName string) error {
 	if runtime.GOOS != "windows" {
 		return fmt.Errorf("автообновление поддерживается только на Windows")
 	}
@@ -96,8 +96,21 @@ func Update(ctx context.Context, currentVersion string) error {
 		return fmt.Errorf("скачивание: %w", err)
 	}
 
-	// Создать bat-скрипт замены
-	bat := fmt.Sprintf(`@echo off
+	var bat string
+	if isService {
+		bat = fmt.Sprintf(`@echo off
+ping 127.0.0.1 -n 3 > nul
+sc stop %s > nul
+ping 127.0.0.1 -n 3 > nul
+del "%s" 2>nul
+move "%s" "%s"
+move "%s" "%s"
+sc start %s > nul
+del "%%~f0"
+exit
+`, serviceName, oldExePath, exePath, oldExePath, newExePath, exePath, serviceName)
+	} else {
+		bat = fmt.Sprintf(`@echo off
 ping 127.0.0.1 -n 3 > nul
 del "%s" 2>nul
 move "%s" "%s"
@@ -106,6 +119,7 @@ start "" "%s"
 del "%%~f0"
 exit
 `, oldExePath, exePath, oldExePath, newExePath, exePath, exePath)
+	}
 
 	if err := os.WriteFile(batPath, []byte(bat), 0755); err != nil {
 		os.Remove(newExePath)

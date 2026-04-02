@@ -43,15 +43,16 @@ func (s *windowsService) Execute(args []string, r <-chan svc.ChangeRequest, chan
 	}
 }
 
+// checkIsService возвращает true если процесс запущен как Windows-служба.
+func checkIsService() bool {
+	is, _ := svc.IsWindowsService()
+	return is
+}
+
 // runAsService запускает бота как Windows-службу если процесс запущен SCM,
 // иначе возвращает false и бот запускается в обычном режиме.
 func runAsService(runFn func(ctx context.Context)) bool {
-	isService, err := svc.IsWindowsService()
-	if err != nil {
-		log.Printf("[SVC] не удалось определить режим запуска: %v", err)
-		return false
-	}
-	if !isService {
+	if !checkIsService() {
 		return false
 	}
 

@@ -4,6 +4,6 @@ package main
 
 import "context"
 
-func runAsService(_ func(ctx context.Context)) bool {
-	return false
-}
+func checkIsService() bool { return false }
+
+func runAsService(_ func(ctx context.Context)) bool { return false }

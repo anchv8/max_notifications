@@ -34,6 +34,8 @@ func main() {
 		log.Fatalf("Ошибка создания MAX клиента: %v", err)
 	}
 
+	isService := checkIsService()
+
 	run := func(ctx context.Context) {
 		info, err := api.Bots.GetBot(ctx)
 		if err != nil {
@@ -44,7 +46,7 @@ func main() {
 		events := make(chan email.Event, 100)
 		emailWorker := email.NewWorker(cfg, database, events)
 		watcher := bot.NewWatcher(database, events)
-		botRunner := bot.NewBot(api, cfg, database, events, emailWorker, Version)
+		botRunner := bot.NewBot(api, cfg, database, events, emailWorker, Version, isService)
 
 		go emailWorker.Run(ctx)
 		go watcher.Run(ctx)

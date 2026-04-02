@@ -17,18 +17,19 @@ import (
 )
 
 type Bot struct {
-	api     *maxbot.Api
-	cfg     *config.Config
-	db      *db.DB
-	events  <-chan email.Event
-	worker  *email.Worker
-	version string
-	stop    context.CancelFunc
-	states  *stateStore
+	api       *maxbot.Api
+	cfg       *config.Config
+	db        *db.DB
+	events    <-chan email.Event
+	worker    *email.Worker
+	version   string
+	isService bool
+	stop      context.CancelFunc
+	states    *stateStore
 }
 
-func NewBot(api *maxbot.Api, cfg *config.Config, database *db.DB, events <-chan email.Event, worker *email.Worker, version string) *Bot {
-	return &Bot{api: api, cfg: cfg, db: database, events: events, worker: worker, version: version, states: newStateStore()}
+func NewBot(api *maxbot.Api, cfg *config.Config, database *db.DB, events <-chan email.Event, worker *email.Worker, version string, isService bool) *Bot {
+	return &Bot{api: api, cfg: cfg, db: database, events: events, worker: worker, version: version, isService: isService, states: newStateStore()}
 }
 
 // Run запускает бота: тест почты, обработка команд и рассылка уведомлений.
@@ -1010,7 +1011,7 @@ func (b *Bot) cmdUpdate(ctx context.Context, chatID int64) {
 
 	b.send(ctx, chatID, fmt.Sprintf("⬇️ Скачиваю версию %s...", latest))
 
-	if err := updater.Update(ctx, b.version); err != nil {
+	if err := updater.Update(ctx, b.version, b.isService, "MaxNotificationBot"); err != nil {
 		b.send(ctx, chatID, fmt.Sprintf("❌ Ошибка обновления: %v", err))
 		return
 	}
