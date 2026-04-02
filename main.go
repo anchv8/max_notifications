@@ -3,31 +3,35 @@ package main
 import (
 	"context"
 	"log"
-	"os"
 	"os/signal"
 	"syscall"
 
-	"github.com/joho/godotenv"
 	maxbot "github.com/max-messenger/max-bot-api-client-go"
-	"github.com/max-messenger/max-bot-api-client-go/schemes"
+
+	"max-echo-bot/internal/bot"
+	"max-echo-bot/internal/config"
+	"max-echo-bot/internal/db"
+	"max-echo-bot/internal/email"
 )
 
 func main() {
-	if err := godotenv.Load(); err != nil {
-		log.Println("Файл .env не найден, используются переменные окружения")
-	}
-
-	token := os.Getenv("BOT_TOKEN")
-	if token == "" {
-		log.Fatal("BOT_TOKEN не задан")
-	}
-
-	api, err := maxbot.New(token)
+	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("Ошибка создания клиента: %v", err)
+		log.Fatalf("Ошибка конфигурации: %v", err)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	database, err := db.Open(cfg.DBPath)
+	if err != nil {
+		log.Fatalf("Ошибка открытия БД: %v", err)
+	}
+	defer database.Close()
+
+	api, err := maxbot.New(cfg.BotToken)
+	if err != nil {
+		log.Fatalf("Ошибка создания MAX клиента: %v", err)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	info, err := api.Bots.GetBot(ctx)
@@ -36,31 +40,17 @@ func main() {
 	}
 	log.Printf("Бот запущен: %s (id=%d)", info.Name, info.UserId)
 
-	log.Println("Ожидаю сообщения... (Ctrl+C для выхода)")
+	events := make(chan email.Event, 100)
 
-	for upd := range api.GetUpdates(ctx) {
-		switch u := upd.(type) {
-		case *schemes.MessageCreatedUpdate:
-			userID := u.Message.Sender.UserId
-			text := u.Message.Body.Text
-			chatID := u.Message.Recipient.ChatId
-			log.Printf("[MSG] userId=%d text=%q", userID, text)
+	emailWorker := email.NewWorker(cfg, database, events)
+	watcher := bot.NewWatcher(database, events)
+	botRunner := bot.NewBot(api, cfg, database, events)
 
-			if text == "" {
-				break
-			}
+	go emailWorker.Run(ctx)
+	go watcher.Run(ctx)
 
-			err := api.Messages.Send(
-				ctx,
-				maxbot.NewMessage().SetChat(chatID).SetText(text),
-			)
-			if err != nil {
-				log.Printf("[ERR] не удалось отправить эхо: %v", err)
-			}
-		default:
-			log.Printf("[UPD] тип=%T", upd)
-		}
-	}
+	log.Printf("Email polling каждые %d мин. Ожидаю сообщения... (Ctrl+C для выхода)", cfg.EmailPollInterval)
+	botRunner.Run(ctx)
 
 	log.Println("Бот завершил работу")
 }
