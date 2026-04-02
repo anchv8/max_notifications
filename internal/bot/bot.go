@@ -161,16 +161,9 @@ func (b *Bot) handleMessage(ctx context.Context, upd *schemes.MessageCreatedUpda
 	}
 	cmd := strings.ToLower(parts[0])
 
-	// Публичные команды
-	switch cmd {
-	case "/start":
-		b.send(ctx, chatID, "Привет! Отправь /invite чтобы запросить доступ.")
-		return
-	case "/invite":
+	// Единственная публичная команда — /invite
+	if cmd == "/invite" {
 		b.cmdInvite(ctx, chatID, userID, name, username)
-		return
-	case "/commands":
-		b.cmdCommands(ctx, chatID, b.cfg.IsAdmin(userID))
 		return
 	}
 
@@ -178,14 +171,13 @@ func (b *Bot) handleMessage(ctx context.Context, upd *schemes.MessageCreatedUpda
 	isAdmin := b.cfg.IsAdmin(userID)
 
 	if !isAdmin {
-		// Проверка что пользователь активен
+		// Проверка что пользователь активен — молча игнорируем незарегистрированных
 		user, err := b.db.GetUser(userID)
 		if err != nil {
 			log.Printf("[BOT] ошибка получения пользователя %d: %v", userID, err)
 			return
 		}
 		if user == nil || user.Status != "active" {
-			b.send(ctx, chatID, "У вас нет доступа. Отправьте /invite для запроса.")
 			return
 		}
 	}
@@ -201,6 +193,8 @@ func (b *Bot) handleMessage(ctx context.Context, upd *schemes.MessageCreatedUpda
 
 	// Команды для активных пользователей
 	switch cmd {
+	case "/commands":
+		b.cmdCommands(ctx, chatID, isAdmin)
 	case "/stats":
 		b.cmdStats(ctx, chatID, userID)
 	case "/last":
