@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -25,7 +26,12 @@ type Config struct {
 }
 
 func Load() (*Config, error) {
-	if err := godotenv.Load(); err != nil {
+	// Ищем .env рядом с исполняемым файлом (важно для Windows-службы)
+	envPath := ".env"
+	if exePath, err := os.Executable(); err == nil {
+		envPath = filepath.Join(filepath.Dir(exePath), ".env")
+	}
+	if err := godotenv.Load(envPath); err != nil {
 		fmt.Println("Файл .env не найден, используются переменные окружения")
 	}
 
