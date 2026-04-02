@@ -49,6 +49,7 @@ func (b *Bot) Run(ctx context.Context) {
 	}
 
 	b.RunBackupScheduler(ctx)
+	b.registerCommands(ctx)
 
 	updates := b.api.GetUpdates(ctx)
 	for {
@@ -167,6 +168,9 @@ func (b *Bot) handleMessage(ctx context.Context, upd *schemes.MessageCreatedUpda
 		return
 	case "/invite":
 		b.cmdInvite(ctx, chatID, userID, name, username)
+		return
+	case "/commands":
+		b.cmdCommands(ctx, chatID, b.cfg.IsAdmin(userID))
 		return
 	}
 
@@ -760,6 +764,74 @@ func (b *Bot) handleCallback(ctx context.Context, upd *schemes.MessageCallbackUp
 			log.Printf("[BOT] ошибка обновления workdays: %v", err)
 		}
 	}
+}
+
+func (b *Bot) registerCommands(ctx context.Context) {
+	commands := []schemes.BotCommand{
+		{Name: "start", Description: "Приветствие"},
+		{Name: "invite", Description: "Запросить доступ"},
+		{Name: "commands", Description: "Список команд"},
+		{Name: "stats", Description: "Статистика бэкапов за 7 и 30 дней"},
+		{Name: "last", Description: "Последние 10 событий"},
+		{Name: "myorgs", Description: "Мои организации"},
+		{Name: "subscribe", Description: "Подписаться на организацию"},
+		{Name: "unsubscribe", Description: "Отписаться от организации"},
+		{Name: "checkerrors", Description: "Ошибки за последние 24 часа"},
+		{Name: "checkmail", Description: "Проверить почту / события за дату"},
+		{Name: "backupdb", Description: "Отправить бэкап БД"},
+		{Name: "workdays", Description: "Настроить рабочие дни организации"},
+		{Name: "pending", Description: "Ожидающие заявки"},
+		{Name: "approve", Description: "Одобрить пользователя"},
+		{Name: "reject", Description: "Отклонить пользователя"},
+		{Name: "users", Description: "Список активных пользователей"},
+		{Name: "orgs", Description: "Список организаций и задач"},
+		{Name: "addorg", Description: "Создать организацию"},
+		{Name: "setorg", Description: "Привязать задачу к организации"},
+		{Name: "version", Description: "Текущая версия бота"},
+		{Name: "update", Description: "Обновить бота"},
+	}
+	if _, err := b.api.Bots.PatchBot(ctx, &schemes.BotPatch{Commands: commands}); err != nil {
+		log.Printf("[BOT] ошибка регистрации команд: %v", err)
+	} else {
+		log.Printf("[BOT] команды зарегистрированы (%d шт.)", len(commands))
+	}
+}
+
+func (b *Bot) cmdCommands(ctx context.Context, chatID int64, isAdmin bool) {
+	var sb strings.Builder
+	sb.WriteString("📋 Доступные команды:\n\n")
+
+	sb.WriteString("*Публичные:*\n")
+	sb.WriteString("/start — приветствие\n")
+	sb.WriteString("/invite — запросить доступ\n")
+	sb.WriteString("/commands — список команд\n")
+
+	sb.WriteString("\n*Для пользователей:*\n")
+	sb.WriteString("/stats — статистика за 7 и 30 дней\n")
+	sb.WriteString("/last — последние 10 событий\n")
+	sb.WriteString("/myorgs — мои организации\n")
+	sb.WriteString("/subscribe <org> — подписаться\n")
+	sb.WriteString("/unsubscribe <org> — отписаться\n")
+
+	if isAdmin {
+		sb.WriteString("\n*Администратор:*\n")
+		sb.WriteString("/pending — ожидающие заявки\n")
+		sb.WriteString("/approve <id> — одобрить пользователя\n")
+		sb.WriteString("/reject <id> — отклонить пользователя\n")
+		sb.WriteString("/users — список активных пользователей\n")
+		sb.WriteString("/orgs — список организаций и задач\n")
+		sb.WriteString("/addorg <name> — создать организацию\n")
+		sb.WriteString("/setorg \"<job>\" <org> — привязать задачу к орг.\n")
+		sb.WriteString("/workdays <org> — настроить рабочие дни\n")
+		sb.WriteString("/checkerrors — ошибки за последние 24ч\n")
+		sb.WriteString("/checkmail — проверить почту сейчас\n")
+		sb.WriteString("/checkmail <дата> — события за дату (2026-04-02)\n")
+		sb.WriteString("/backupdb — отправить бэкап БД\n")
+		sb.WriteString("/version — текущая версия\n")
+		sb.WriteString("/update — обновить бота\n")
+	}
+
+	b.send(ctx, chatID, sb.String())
 }
 
 func (b *Bot) cmdBackupDB(ctx context.Context, chatID int64) {
