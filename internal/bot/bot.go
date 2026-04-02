@@ -24,10 +24,11 @@ type Bot struct {
 	worker  *email.Worker
 	version string
 	stop    context.CancelFunc
+	states  *stateStore
 }
 
 func NewBot(api *maxbot.Api, cfg *config.Config, database *db.DB, events <-chan email.Event, worker *email.Worker, version string) *Bot {
-	return &Bot{api: api, cfg: cfg, db: database, events: events, worker: worker, version: version}
+	return &Bot{api: api, cfg: cfg, db: database, events: events, worker: worker, version: version, states: newStateStore()}
 }
 
 // Run запускает бота: тест почты, обработка команд и рассылка уведомлений.
@@ -133,19 +134,43 @@ func (b *Bot) handleEvent(ctx context.Context, ev email.Event) {
 
 	b.broadcast(ctx, recipients, text)
 
-	// Уведомить всех администраторов о новой задаче
+	// Уведомить всех администраторов о новой задаче с кнопками привязки
 	if ev.IsNewJob {
-		msg := fmt.Sprintf(
-			"⚙️ Новая задача зарегистрирована: %q. Привяжите её к организации:\n/setorg \"%s\" <org_name>",
-			ev.Job.JobName, ev.Job.JobName,
-		)
 		for _, id := range b.cfg.AdminUserIDs {
-			b.sendToUser(ctx, id, msg)
+			b.sendNewJobBindMessage(ctx, id, ev.Job.JobName)
 		}
 	}
 }
 
 // handleMessage маршрутизирует входящее сообщение к нужному обработчику.
+// sendNewJobBindMessage отправляет администратору сообщение с кнопками привязки новой задачи к организации.
+func (b *Bot) sendNewJobBindMessage(ctx context.Context, adminID int64, jobName string) {
+	orgs, err := b.db.ListOrgs()
+	if err != nil {
+		log.Printf("[BOT] ошибка получения организаций: %v", err)
+		return
+	}
+
+	kb := &maxbot.Keyboard{}
+	// По 2 организации в ряд
+	var row *maxbot.KeyboardRow
+	for i, org := range orgs {
+		if i%2 == 0 {
+			row = kb.AddRow()
+		}
+		payload := fmt.Sprintf("bind:%s:%d", jobName, org.ID)
+		row.AddCallback(org.Name, schemes.DEFAULT, payload)
+	}
+	// Кнопка создания новой организации отдельной строкой
+	newRow := kb.AddRow()
+	newRow.AddCallback("➕ Создать организацию", schemes.DEFAULT, fmt.Sprintf("neworg:%s", jobName))
+
+	msg := fmt.Sprintf("⚙️ Новая задача: %q\nВыберите организацию для привязки:", jobName)
+	if err := b.api.Messages.Send(ctx, maxbot.NewMessage().SetUser(adminID).SetText(msg).AddKeyboard(kb)); err != nil {
+		log.Printf("[BOT] ошибка отправки bind-сообщения: %v", err)
+	}
+}
+
 func (b *Bot) handleMessage(ctx context.Context, upd *schemes.MessageCreatedUpdate) {
 	userID := upd.Message.Sender.UserId
 	chatID := upd.Message.Recipient.ChatId
@@ -154,6 +179,14 @@ func (b *Bot) handleMessage(ctx context.Context, upd *schemes.MessageCreatedUpda
 	text := strings.TrimSpace(upd.Message.Body.Text)
 
 	log.Printf("[BOT] userId=%d text=%q", userID, text)
+
+	// Обработка активного состояния (state machine)
+	if b.cfg.IsAdmin(userID) {
+		if st := b.states.get(userID); st.kind != stateNone {
+			b.handleState(ctx, userID, chatID, text, st)
+			return
+		}
+	}
 
 	parts := strings.Fields(text)
 	if len(parts) == 0 {
@@ -185,7 +218,7 @@ func (b *Bot) handleMessage(ctx context.Context, upd *schemes.MessageCreatedUpda
 	// Команды администратора
 	if isAdmin {
 		switch cmd {
-		case "/pending", "/approve", "/reject", "/users", "/orgs", "/addorg", "/setorg", "/checkmail", "/workdays", "/checkerrors", "/update", "/version", "/backupdb":
+		case "/pending", "/approve", "/reject", "/deactivate", "/users", "/orgs", "/addorg", "/setorg", "/checkmail", "/workdays", "/checkerrors", "/update", "/version", "/backupdb":
 			b.handleAdminCmd(ctx, chatID, cmd, parts)
 			return
 		}
@@ -234,6 +267,12 @@ func (b *Bot) handleAdminCmd(ctx context.Context, chatID int64, cmd string, part
 			return
 		}
 		b.cmdApproveReject(ctx, chatID, parts[1], "rejected")
+	case "/deactivate":
+		if len(parts) < 2 {
+			b.send(ctx, chatID, "Использование: /deactivate <user_id>")
+			return
+		}
+		b.cmdDeactivate(ctx, chatID, parts[1])
 	case "/users":
 		b.cmdUsers(ctx, chatID)
 	case "/orgs":
@@ -472,6 +511,25 @@ func (b *Bot) cmdApproveReject(ctx context.Context, chatID int64, userIDStr, sta
 	}
 	b.send(ctx, chatID, fmt.Sprintf("Пользователь %s %s.", user.Name, action))
 	b.sendToUser(ctx, targetID, userNotif)
+}
+
+func (b *Bot) cmdDeactivate(ctx context.Context, chatID int64, userIDStr string) {
+	var targetID int64
+	if _, err := fmt.Sscanf(userIDStr, "%d", &targetID); err != nil {
+		b.send(ctx, chatID, "Неверный user_id.")
+		return
+	}
+	user, err := b.db.GetUser(targetID)
+	if err != nil || user == nil {
+		b.send(ctx, chatID, "Пользователь не найден.")
+		return
+	}
+	if err := b.db.SetUserStatus(targetID, "inactive"); err != nil {
+		b.send(ctx, chatID, "Ошибка обновления статуса.")
+		return
+	}
+	b.send(ctx, chatID, fmt.Sprintf("Пользователь %s деактивирован.", user.Name))
+	b.sendToUser(ctx, targetID, "Ваш доступ был отозван.")
 }
 
 func (b *Bot) cmdUsers(ctx context.Context, chatID int64) {
@@ -757,14 +815,96 @@ func (b *Bot) handleCallback(ctx context.Context, upd *schemes.MessageCallbackUp
 		if err := b.api.Messages.Send(ctx, maxbot.NewMessage().SetChat(chatID).SetText(msg).AddKeyboard(kb)); err != nil {
 			log.Printf("[BOT] ошибка обновления workdays: %v", err)
 		}
+		return
+	}
+
+	chatID := upd.GetChatID()
+	b.api.Messages.AnswerOnCallback(ctx, upd.Callback.CallbackID, &schemes.CallbackAnswer{})
+
+	// bind:<jobName>:<orgID> — привязать задачу к организации
+	if strings.HasPrefix(payload, "bind:") {
+		// payload: bind:<jobName>:<orgID>
+		// jobName может содержать двоеточия, поэтому парсим с конца
+		lastColon := strings.LastIndex(payload, ":")
+		if lastColon < 5 {
+			return
+		}
+		jobName := payload[5:lastColon]
+		var orgID int64
+		if _, err := fmt.Sscanf(payload[lastColon+1:], "%d", &orgID); err != nil {
+			return
+		}
+		// Проверяем — вдруг другой админ уже привязал
+		job, err := b.db.GetJobByName(jobName)
+		if err == nil && job != nil && job.OrgID != nil {
+			existingOrg, _ := b.db.GetOrgByID(*job.OrgID)
+			if existingOrg != nil {
+				b.send(ctx, chatID, fmt.Sprintf("ℹ️ Задача %q уже привязана к организации %q.", jobName, existingOrg.Name))
+				return
+			}
+		}
+		org, err := b.db.GetOrgByID(orgID)
+		if err != nil || org == nil {
+			b.send(ctx, chatID, "Организация не найдена.")
+			return
+		}
+		if err := b.db.SetJobOrg(jobName, orgID); err != nil {
+			b.send(ctx, chatID, fmt.Sprintf("Ошибка привязки: %v", err))
+			return
+		}
+		b.send(ctx, chatID, fmt.Sprintf("✅ Задача %q привязана к организации %q.", jobName, org.Name))
+		return
+	}
+
+	// neworg:<jobName> — запросить название новой организации
+	if strings.HasPrefix(payload, "neworg:") {
+		jobName := payload[7:]
+		b.states.set(userID, userState{kind: stateAwaitingOrgName, payload: jobName})
+		b.send(ctx, chatID, fmt.Sprintf("Введите название новой организации для задачи %q:", jobName))
+		return
+	}
+}
+
+// handleState обрабатывает входящее сообщение когда пользователь находится в активном состоянии.
+func (b *Bot) handleState(ctx context.Context, userID, chatID int64, text string, st userState) {
+	switch st.kind {
+	case stateAwaitingOrgName:
+		jobName := st.payload
+		orgName := strings.TrimSpace(text)
+		if orgName == "" {
+			b.send(ctx, chatID, "Название не может быть пустым. Попробуйте ещё раз:")
+			return
+		}
+		b.states.clear(userID)
+
+		// Проверяем — вдруг другой админ уже привязал пока вводили название
+		job, err := b.db.GetJobByName(jobName)
+		if err == nil && job != nil && job.OrgID != nil {
+			existingOrg, _ := b.db.GetOrgByID(*job.OrgID)
+			if existingOrg != nil {
+				b.send(ctx, chatID, fmt.Sprintf("ℹ️ Задача %q уже привязана к организации %q.", jobName, existingOrg.Name))
+				return
+			}
+		}
+
+		// Создаём организацию (игнорируем ошибку если уже существует)
+		_ = b.db.CreateOrg(orgName)
+
+		org, err := b.db.GetOrgByName(orgName)
+		if err != nil || org == nil {
+			b.send(ctx, chatID, "Ошибка создания организации.")
+			return
+		}
+		if err := b.db.SetJobOrg(jobName, org.ID); err != nil {
+			b.send(ctx, chatID, fmt.Sprintf("Ошибка привязки задачи: %v", err))
+			return
+		}
+		b.send(ctx, chatID, fmt.Sprintf("✅ Организация %q создана, задача %q привязана.", orgName, jobName))
 	}
 }
 
 func (b *Bot) registerCommands(ctx context.Context) {
 	commands := []schemes.BotCommand{
-		{Name: "start", Description: "Приветствие"},
-		{Name: "invite", Description: "Запросить доступ"},
-		{Name: "commands", Description: "Список команд"},
 		{Name: "stats", Description: "Статистика бэкапов за 7 и 30 дней"},
 		{Name: "last", Description: "Последние 10 событий"},
 		{Name: "myorgs", Description: "Мои организации"},
@@ -777,6 +917,7 @@ func (b *Bot) registerCommands(ctx context.Context) {
 		{Name: "pending", Description: "Ожидающие заявки"},
 		{Name: "approve", Description: "Одобрить пользователя"},
 		{Name: "reject", Description: "Отклонить пользователя"},
+		{Name: "deactivate", Description: "Деактивировать пользователя"},
 		{Name: "users", Description: "Список активных пользователей"},
 		{Name: "orgs", Description: "Список организаций и задач"},
 		{Name: "addorg", Description: "Создать организацию"},
@@ -795,12 +936,7 @@ func (b *Bot) cmdCommands(ctx context.Context, chatID int64, isAdmin bool) {
 	var sb strings.Builder
 	sb.WriteString("📋 Доступные команды:\n\n")
 
-	sb.WriteString("*Публичные:*\n")
-	sb.WriteString("/start — приветствие\n")
-	sb.WriteString("/invite — запросить доступ\n")
-	sb.WriteString("/commands — список команд\n")
-
-	sb.WriteString("\n*Для пользователей:*\n")
+	sb.WriteString("*Для пользователей:*\n")
 	sb.WriteString("/stats — статистика за 7 и 30 дней\n")
 	sb.WriteString("/last — последние 10 событий\n")
 	sb.WriteString("/myorgs — мои организации\n")
@@ -812,6 +948,7 @@ func (b *Bot) cmdCommands(ctx context.Context, chatID int64, isAdmin bool) {
 		sb.WriteString("/pending — ожидающие заявки\n")
 		sb.WriteString("/approve <id> — одобрить пользователя\n")
 		sb.WriteString("/reject <id> — отклонить пользователя\n")
+		sb.WriteString("/deactivate <id> — деактивировать пользователя\n")
 		sb.WriteString("/users — список активных пользователей\n")
 		sb.WriteString("/orgs — список организаций и задач\n")
 		sb.WriteString("/addorg <name> — создать организацию\n")
