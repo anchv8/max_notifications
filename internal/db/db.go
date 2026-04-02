@@ -463,6 +463,7 @@ func (d *DB) SaveEvent(jobID int64, status, message string) (*BackupEvent, error
 }
 
 type Stats struct {
+	OrgName   string // пустая строка если задача не привязана к организации
 	JobName   string
 	Success7  int
 	Failure7  int
@@ -478,7 +479,8 @@ func (d *DB) GetStats(orgIDs []int64) ([]Stats, error) {
 
 	if len(orgIDs) == 0 {
 		rows, err = d.conn.Query(`
-			SELECT j.job_name,
+			SELECT COALESCE(o.name, ''),
+				j.job_name,
 				SUM(CASE WHEN be.status='success' AND (julianday('now')-julianday(be.received_at))<=7  THEN 1 ELSE 0 END),
 				SUM(CASE WHEN be.status='failure' AND (julianday('now')-julianday(be.received_at))<=7  THEN 1 ELSE 0 END),
 				SUM(CASE WHEN be.status='missed'  AND (julianday('now')-julianday(be.received_at))<=7  THEN 1 ELSE 0 END),
@@ -486,9 +488,10 @@ func (d *DB) GetStats(orgIDs []int64) ([]Stats, error) {
 				SUM(CASE WHEN be.status='failure' AND (julianday('now')-julianday(be.received_at))<=30 THEN 1 ELSE 0 END),
 				SUM(CASE WHEN be.status='missed'  AND (julianday('now')-julianday(be.received_at))<=30 THEN 1 ELSE 0 END)
 			FROM jobs j
+			LEFT JOIN organizations o ON j.org_id = o.id
 			LEFT JOIN backup_events be ON j.id = be.job_id
 			GROUP BY j.id
-			ORDER BY j.job_name
+			ORDER BY o.name, j.job_name
 		`)
 	} else {
 		placeholders := "?"
@@ -498,7 +501,8 @@ func (d *DB) GetStats(orgIDs []int64) ([]Stats, error) {
 			args = append(args, id)
 		}
 		rows, err = d.conn.Query(`
-			SELECT j.job_name,
+			SELECT COALESCE(o.name, ''),
+				j.job_name,
 				SUM(CASE WHEN be.status='success' AND (julianday('now')-julianday(be.received_at))<=7  THEN 1 ELSE 0 END),
 				SUM(CASE WHEN be.status='failure' AND (julianday('now')-julianday(be.received_at))<=7  THEN 1 ELSE 0 END),
 				SUM(CASE WHEN be.status='missed'  AND (julianday('now')-julianday(be.received_at))<=7  THEN 1 ELSE 0 END),
@@ -506,10 +510,11 @@ func (d *DB) GetStats(orgIDs []int64) ([]Stats, error) {
 				SUM(CASE WHEN be.status='failure' AND (julianday('now')-julianday(be.received_at))<=30 THEN 1 ELSE 0 END),
 				SUM(CASE WHEN be.status='missed'  AND (julianday('now')-julianday(be.received_at))<=30 THEN 1 ELSE 0 END)
 			FROM jobs j
+			LEFT JOIN organizations o ON j.org_id = o.id
 			LEFT JOIN backup_events be ON j.id = be.job_id
 			WHERE j.org_id IN (`+placeholders+`)
 			GROUP BY j.id
-			ORDER BY j.job_name
+			ORDER BY o.name, j.job_name
 		`, args...)
 	}
 	if err != nil {
@@ -519,7 +524,7 @@ func (d *DB) GetStats(orgIDs []int64) ([]Stats, error) {
 	var stats []Stats
 	for rows.Next() {
 		var s Stats
-		if err := rows.Scan(&s.JobName, &s.Success7, &s.Failure7, &s.Missed7, &s.Success30, &s.Failure30, &s.Missed30); err != nil {
+		if err := rows.Scan(&s.OrgName, &s.JobName, &s.Success7, &s.Failure7, &s.Missed7, &s.Success30, &s.Failure30, &s.Missed30); err != nil {
 			return nil, err
 		}
 		stats = append(stats, s)

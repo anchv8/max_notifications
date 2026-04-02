@@ -34,26 +34,33 @@ func main() {
 		log.Fatalf("Ошибка создания MAX клиента: %v", err)
 	}
 
+	run := func(ctx context.Context) {
+		info, err := api.Bots.GetBot(ctx)
+		if err != nil {
+			log.Fatalf("Ошибка получения информации о боте: %v", err)
+		}
+		log.Printf("Бот запущен: %s (id=%d)", info.Name, info.UserId)
+
+		events := make(chan email.Event, 100)
+		emailWorker := email.NewWorker(cfg, database, events)
+		watcher := bot.NewWatcher(database, events)
+		botRunner := bot.NewBot(api, cfg, database, events, emailWorker, Version)
+
+		go emailWorker.Run(ctx)
+		go watcher.Run(ctx)
+
+		log.Printf("Email polling каждые %d мин. Ожидаю сообщения...", cfg.EmailPollInterval)
+		botRunner.Run(ctx)
+		log.Println("Бот завершил работу")
+	}
+
+	// Если запущен как Windows-служба — передаём управление SCM
+	if runAsService(run) {
+		return
+	}
+
+	// Обычный запуск — завершение по Ctrl+C / SIGTERM
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-
-	info, err := api.Bots.GetBot(ctx)
-	if err != nil {
-		log.Fatalf("Ошибка получения информации о боте: %v", err)
-	}
-	log.Printf("Бот запущен: %s (id=%d)", info.Name, info.UserId)
-
-	events := make(chan email.Event, 100)
-
-	emailWorker := email.NewWorker(cfg, database, events)
-	watcher := bot.NewWatcher(database, events)
-	botRunner := bot.NewBot(api, cfg, database, events, emailWorker, Version)
-
-	go emailWorker.Run(ctx)
-	go watcher.Run(ctx)
-
-	log.Printf("Email polling каждые %d мин. Ожидаю сообщения... (Ctrl+C для выхода)", cfg.EmailPollInterval)
-	botRunner.Run(ctx)
-
-	log.Println("Бот завершил работу")
+	run(ctx)
 }

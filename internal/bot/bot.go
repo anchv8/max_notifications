@@ -371,13 +371,24 @@ func (b *Bot) cmdStats(ctx context.Context, chatID, userID int64) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("📊 Статистика за 7 дней:\n")
+	sb.WriteString("📊 Статистика бэкапов\n")
+
+	currentOrg := "\x00" // sentinel
 	for _, s := range stats {
-		sb.WriteString(fmt.Sprintf("%s: ✅ %d  ❌ %d  ⚠️ %d\n", s.JobName, s.Success7, s.Failure7, s.Missed7))
-	}
-	sb.WriteString("\nЗа 30 дней:\n")
-	for _, s := range stats {
-		sb.WriteString(fmt.Sprintf("%s: ✅ %d  ❌ %d  ⚠️ %d\n", s.JobName, s.Success30, s.Failure30, s.Missed30))
+		orgLabel := s.OrgName
+		if orgLabel == "" {
+			orgLabel = "Без организации"
+		}
+		if orgLabel != currentOrg {
+			sb.WriteString(fmt.Sprintf("\n🏢 %s\n", orgLabel))
+			currentOrg = orgLabel
+		}
+		sb.WriteString(fmt.Sprintf(
+			"  %s\n    7д:  ✅%d ❌%d ⚠️%d\n    30д: ✅%d ❌%d ⚠️%d\n",
+			s.JobName,
+			s.Success7, s.Failure7, s.Missed7,
+			s.Success30, s.Failure30, s.Missed30,
+		))
 	}
 	b.send(ctx, chatID, sb.String())
 }
