@@ -1,4 +1,7 @@
 .env
-max-echo-bot
+.env.old
 *.exe
+*.db
+data/
+.DS_Store
 github_token.txt

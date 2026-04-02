@@ -48,6 +48,8 @@ func (b *Bot) Run(ctx context.Context) {
 		}
 	}
 
+	b.RunBackupScheduler(ctx)
+
 	updates := b.api.GetUpdates(ctx)
 	for {
 		select {
@@ -187,7 +189,7 @@ func (b *Bot) handleMessage(ctx context.Context, upd *schemes.MessageCreatedUpda
 	// Команды администратора
 	if isAdmin {
 		switch cmd {
-		case "/pending", "/approve", "/reject", "/users", "/orgs", "/addorg", "/setorg", "/checkmail", "/workdays", "/checkerrors", "/update", "/version":
+		case "/pending", "/approve", "/reject", "/users", "/orgs", "/addorg", "/setorg", "/checkmail", "/workdays", "/checkerrors", "/update", "/version", "/backupdb":
 			b.handleAdminCmd(ctx, chatID, cmd, parts)
 			return
 		}
@@ -246,6 +248,8 @@ func (b *Bot) handleAdminCmd(ctx context.Context, chatID int64, cmd string, part
 		b.cmdAddOrg(ctx, chatID, strings.Join(parts[1:], " "))
 	case "/setorg":
 		b.cmdSetOrg(ctx, chatID, parts)
+	case "/backupdb":
+		b.cmdBackupDB(ctx, chatID)
 	case "/version":
 		b.cmdVersion(ctx, chatID)
 	case "/update":
@@ -756,6 +760,13 @@ func (b *Bot) handleCallback(ctx context.Context, upd *schemes.MessageCallbackUp
 			log.Printf("[BOT] ошибка обновления workdays: %v", err)
 		}
 	}
+}
+
+func (b *Bot) cmdBackupDB(ctx context.Context, chatID int64) {
+	b.send(ctx, chatID, "📤 Отправляю бэкап БД...")
+	go func() {
+		b.sendDBBackup(ctx, fmt.Sprintf("🗄 Бэкап БД по запросу — %s", time.Now().In(b.cfg.Location).Format("2006-01-02 15:04")))
+	}()
 }
 
 func (b *Bot) cmdVersion(ctx context.Context, chatID int64) {

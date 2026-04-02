@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 )
@@ -19,6 +20,8 @@ type Config struct {
 	IMAPFolder        string
 	EmailPollInterval int // минуты
 	DBPath            string
+	DBBackupTime      string    // "15:04", пусто — не отправлять автоматически
+	Location          *time.Location
 }
 
 func Load() (*Config, error) {
@@ -46,6 +49,7 @@ func Load() (*Config, error) {
 		IMAPFolder:        os.Getenv("IMAP_FOLDER"),
 		EmailPollInterval: pollInterval,
 		DBPath:            os.Getenv("DB_PATH"),
+		DBBackupTime:      os.Getenv("DB_BACKUP_TIME"),
 	}
 
 	if cfg.BotToken == "" {
@@ -71,6 +75,23 @@ func Load() (*Config, error) {
 	}
 	if cfg.DBPath == "" {
 		cfg.DBPath = "./data/bot.db"
+	}
+
+	tz := os.Getenv("TIMEZONE")
+	if tz == "" {
+		cfg.Location = time.Local
+	} else {
+		loc, err := time.LoadLocation(tz)
+		if err != nil {
+			return nil, fmt.Errorf("TIMEZONE %q невалидный: %w", tz, err)
+		}
+		cfg.Location = loc
+	}
+
+	if cfg.DBBackupTime != "" {
+		if _, err := time.ParseInLocation("15:04", cfg.DBBackupTime, cfg.Location); err != nil {
+			return nil, fmt.Errorf("DB_BACKUP_TIME %q невалидный, ожидается HH:MM: %w", cfg.DBBackupTime, err)
+		}
 	}
 
 	return cfg, nil
