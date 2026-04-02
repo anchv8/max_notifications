@@ -37,13 +37,13 @@ func (b *Bot) Run(ctx context.Context) {
 	ctx, b.stop = context.WithCancel(ctx)
 	// Тест подключения к IMAP при старте
 	if err := b.worker.TestConnection(); err != nil {
-		msg := fmt.Sprintf("⚠️ Не удалось подключиться к почте при старте: %v", err)
+		msg := fmt.Sprintf("⚠️ Не удалось подключиться к почте при старте: `%v`", err)
 		log.Printf("[BOT] %s", msg)
 		for _, id := range b.cfg.AdminUserIDs {
 			b.sendToUser(ctx, id, msg)
 		}
 	} else {
-		msg := fmt.Sprintf("✅ Бот запущен. Почта %s подключена.", b.cfg.IMAPUser)
+		msg := fmt.Sprintf("✅ Бот запущен. Почта `%s` подключена.", b.cfg.IMAPUser)
 		log.Printf("[BOT] %s", msg)
 		for _, id := range b.cfg.AdminUserIDs {
 			b.sendToUser(ctx, id, msg)
@@ -79,14 +79,14 @@ func (b *Bot) Run(ctx context.Context) {
 
 // send отправляет сообщение в чат (для ответов на входящие сообщения).
 func (b *Bot) send(ctx context.Context, chatID int64, text string) {
-	if err := b.api.Messages.Send(ctx, maxbot.NewMessage().SetChat(chatID).SetText(text)); err != nil {
+	if err := b.api.Messages.Send(ctx, maxbot.NewMessage().SetChat(chatID).SetText(text).SetFormat(schemes.Markdown)); err != nil {
 		log.Printf("[BOT] ошибка отправки в chat=%d: %v", chatID, err)
 	}
 }
 
 // sendToUser отправляет сообщение конкретному пользователю по его userID.
 func (b *Bot) sendToUser(ctx context.Context, userID int64, text string) {
-	if err := b.api.Messages.Send(ctx, maxbot.NewMessage().SetUser(userID).SetText(text)); err != nil {
+	if err := b.api.Messages.Send(ctx, maxbot.NewMessage().SetUser(userID).SetText(text).SetFormat(schemes.Markdown)); err != nil {
 		log.Printf("[BOT] ошибка отправки пользователю user=%d: %v", userID, err)
 	}
 }
@@ -104,11 +104,11 @@ func (b *Bot) handleEvent(ctx context.Context, ev email.Event) {
 	var text string
 	switch ev.Event.Status {
 	case "success":
-		text = fmt.Sprintf("✅ %s — успешно [%s]", ev.Event.JobName, ts)
+		text = fmt.Sprintf("✅ **%s** — успешно\n`%s`", ev.Event.JobName, ts)
 	case "failure":
-		text = fmt.Sprintf("❌ %s — ошибка: %s [%s]", ev.Event.JobName, ev.Event.Message, ts)
+		text = fmt.Sprintf("❌ **%s** — ошибка\n_%s_\n`%s`", ev.Event.JobName, ev.Event.Message, ts)
 	case "missed":
-		text = fmt.Sprintf("⚠️ %s — %s [%s]", ev.Event.JobName, ev.Event.Message, ts)
+		text = fmt.Sprintf("⚠️ **%s** — %s\n`%s`", ev.Event.JobName, ev.Event.Message, ts)
 	}
 
 	// Уведомить всех администраторов всегда
@@ -166,7 +166,7 @@ func (b *Bot) sendNewJobBindMessage(ctx context.Context, adminID int64, jobName 
 	newRow := kb.AddRow()
 	newRow.AddCallback("➕ Создать организацию", schemes.DEFAULT, fmt.Sprintf("neworg:%s", jobName))
 
-	msg := fmt.Sprintf("⚙️ Новая задача: %q\nВыберите организацию для привязки:", jobName)
+	msg := fmt.Sprintf("⚙️ **Новая задача:** `%s`\nВыберите организацию для привязки:", jobName)
 	if err := b.api.Messages.Send(ctx, maxbot.NewMessage().SetUser(adminID).SetText(msg).AddKeyboard(kb)); err != nil {
 		log.Printf("[BOT] ошибка отправки bind-сообщения: %v", err)
 	}
@@ -338,7 +338,7 @@ func (b *Bot) cmdInvite(ctx context.Context, chatID, userID int64, name, usernam
 	}
 	for _, id := range b.cfg.AdminUserIDs {
 		b.sendToUser(ctx, id, fmt.Sprintf(
-			"👤 Новый запрос доступа: %s%s (id: %d)\n/approve %d или /reject %d",
+			"👤 **Новый запрос доступа**\n**%s**%s\nID: `%d`\n`/approve %d` | `/reject %d`",
 			name, usernameStr, userID, userID, userID,
 		))
 	}
@@ -420,6 +420,7 @@ func (b *Bot) cmdLast(ctx context.Context, chatID, userID int64) {
 	}
 
 	var sb strings.Builder
+	sb.WriteString("**Последние события:**\n\n")
 	for _, e := range events {
 		ts := e.ReceivedAt.Format("2006-01-02 15:04")
 		icon := "✅"
@@ -428,7 +429,7 @@ func (b *Bot) cmdLast(ctx context.Context, chatID, userID int64) {
 		} else if e.Status == "missed" {
 			icon = "⚠️"
 		}
-		sb.WriteString(fmt.Sprintf("%s %s — %s\n", icon, e.JobName, ts))
+		sb.WriteString(fmt.Sprintf("%s **%s** — `%s`\n", icon, e.JobName, ts))
 	}
 	b.send(ctx, chatID, sb.String())
 }
@@ -440,13 +441,13 @@ func (b *Bot) cmdMyOrgs(ctx context.Context, chatID, userID int64) {
 		return
 	}
 	if len(orgs) == 0 {
-		b.send(ctx, chatID, "Вы не подписаны ни на одну организацию.\nИспользуйте /subscribe <org_name>")
+		b.send(ctx, chatID, "Вы не подписаны ни на одну организацию.\nИспользуйте `/subscribe <org_name>`")
 		return
 	}
 	var sb strings.Builder
-	sb.WriteString("Ваши организации:\n")
+	sb.WriteString("**Ваши организации:**\n\n")
 	for _, o := range orgs {
-		sb.WriteString("• " + o.Name + "\n")
+		sb.WriteString("• **" + o.Name + "**\n")
 	}
 	b.send(ctx, chatID, sb.String())
 }
@@ -454,27 +455,27 @@ func (b *Bot) cmdMyOrgs(ctx context.Context, chatID, userID int64) {
 func (b *Bot) cmdSubscribe(ctx context.Context, chatID, userID int64, orgName string) {
 	org, err := b.db.GetOrgByName(orgName)
 	if err != nil || org == nil {
-		b.send(ctx, chatID, fmt.Sprintf("Организация %q не найдена.", orgName))
+		b.send(ctx, chatID, fmt.Sprintf("Организация **%s** не найдена.", orgName))
 		return
 	}
 	if err := b.db.SubscribeUserToOrg(userID, org.ID); err != nil {
 		b.send(ctx, chatID, "Ошибка подписки.")
 		return
 	}
-	b.send(ctx, chatID, fmt.Sprintf("Вы подписались на %q.", orgName))
+	b.send(ctx, chatID, fmt.Sprintf("✅ Вы подписались на **%s**.", orgName))
 }
 
 func (b *Bot) cmdUnsubscribe(ctx context.Context, chatID, userID int64, orgName string) {
 	org, err := b.db.GetOrgByName(orgName)
 	if err != nil || org == nil {
-		b.send(ctx, chatID, fmt.Sprintf("Организация %q не найдена.", orgName))
+		b.send(ctx, chatID, fmt.Sprintf("Организация **%s** не найдена.", orgName))
 		return
 	}
 	if err := b.db.UnsubscribeUserFromOrg(userID, org.ID); err != nil {
 		b.send(ctx, chatID, "Ошибка отписки.")
 		return
 	}
-	b.send(ctx, chatID, fmt.Sprintf("Вы отписались от %q.", orgName))
+	b.send(ctx, chatID, fmt.Sprintf("✅ Вы отписались от **%s**.", orgName))
 }
 
 func (b *Bot) cmdPending(ctx context.Context, chatID int64) {
@@ -488,13 +489,13 @@ func (b *Bot) cmdPending(ctx context.Context, chatID int64) {
 		return
 	}
 	var sb strings.Builder
-	sb.WriteString("Ожидающие заявки:\n")
+	sb.WriteString("**Ожидающие заявки:**\n\n")
 	for _, u := range users {
 		uname := ""
 		if u.Username != "" {
 			uname = " (@" + u.Username + ")"
 		}
-		sb.WriteString(fmt.Sprintf("• %s%s (id: %d) — /approve %d | /reject %d\n",
+		sb.WriteString(fmt.Sprintf("**%s**%s — `%d`\n`/approve %d` | `/reject %d`\n\n",
 			u.Name, uname, u.ID, u.ID, u.ID))
 	}
 	b.send(ctx, chatID, sb.String())
@@ -516,12 +517,12 @@ func (b *Bot) cmdApproveReject(ctx context.Context, chatID int64, userIDStr, sta
 		return
 	}
 	action := "подтверждён"
-	userNotif := "Ваша заявка одобрена! Теперь вы можете получать уведомления.\nПодпишитесь на организации: /subscribe <org_name>"
+	userNotif := "✅ Ваша заявка одобрена! Теперь вы можете получать уведомления.\nПодпишитесь на организации: `/subscribe <org_name>`"
 	if status == "rejected" {
 		action = "отклонён"
-		userNotif = "Ваша заявка была отклонена."
+		userNotif = "❌ Ваша заявка была отклонена."
 	}
-	b.send(ctx, chatID, fmt.Sprintf("Пользователь %s %s.", user.Name, action))
+	b.send(ctx, chatID, fmt.Sprintf("Пользователь **%s** %s.", user.Name, action))
 	b.sendToUser(ctx, targetID, userNotif)
 }
 
@@ -555,14 +556,14 @@ func (b *Bot) cmdUsers(ctx context.Context, chatID int64) {
 		return
 	}
 	var sb strings.Builder
-	sb.WriteString("Активные пользователи:\n")
+	sb.WriteString("**Активные пользователи:**\n\n")
 	for _, u := range users {
 		orgs, _ := b.db.ListUserOrgs(u.ID)
 		orgNames := make([]string, 0, len(orgs))
 		for _, o := range orgs {
 			orgNames = append(orgNames, o.Name)
 		}
-		orgStr := "нет подписок"
+		orgStr := "_нет подписок_"
 		if len(orgNames) > 0 {
 			orgStr = strings.Join(orgNames, ", ")
 		}
@@ -570,7 +571,7 @@ func (b *Bot) cmdUsers(ctx context.Context, chatID int64) {
 		if u.Username != "" {
 			uname = " (@" + u.Username + ")"
 		}
-		sb.WriteString(fmt.Sprintf("• %s%s — %s\n", u.Name, uname, orgStr))
+		sb.WriteString(fmt.Sprintf("**%s**%s — `%d`\n%s\n\n", u.Name, uname, u.ID, orgStr))
 	}
 	b.send(ctx, chatID, sb.String())
 }
@@ -599,14 +600,18 @@ func (b *Bot) cmdOrgs(ctx context.Context, chatID int64) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("Организации:\n")
+	sb.WriteString("**Организации:**\n\n")
 	for _, o := range orgs {
 		jobNames := jobsByOrg[o.ID]
-		jobStr := "нет задач"
+		jobStr := "_нет задач_"
 		if len(jobNames) > 0 {
-			jobStr = strings.Join(jobNames, ", ")
+			quoted := make([]string, len(jobNames))
+			for i, jn := range jobNames {
+				quoted[i] = "`" + jn + "`"
+			}
+			jobStr = strings.Join(quoted, ", ")
 		}
-		sb.WriteString(fmt.Sprintf("• %s — %s\n", o.Name, jobStr))
+		sb.WriteString(fmt.Sprintf("🏢 **%s**\n%s\n\n", o.Name, jobStr))
 	}
 
 	var unassigned []string
@@ -616,9 +621,9 @@ func (b *Bot) cmdOrgs(ctx context.Context, chatID int64) {
 		}
 	}
 	if len(unassigned) > 0 {
-		sb.WriteString("\nБез организации:\n")
+		sb.WriteString("**Без организации:**\n")
 		for _, name := range unassigned {
-			sb.WriteString("• " + name + "\n")
+			sb.WriteString("• `" + name + "`\n")
 		}
 	}
 	b.send(ctx, chatID, sb.String())
@@ -629,7 +634,7 @@ func (b *Bot) cmdAddOrg(ctx context.Context, chatID int64, name string) {
 		b.send(ctx, chatID, fmt.Sprintf("Ошибка создания организации (возможно, уже существует): %v", err))
 		return
 	}
-	b.send(ctx, chatID, fmt.Sprintf("Организация %q создана.", name))
+	b.send(ctx, chatID, fmt.Sprintf("✅ Организация **%s** создана.", name))
 }
 
 func (b *Bot) cmdSetOrg(ctx context.Context, chatID int64, parts []string) {
@@ -673,20 +678,20 @@ func (b *Bot) cmdCheckMail(ctx context.Context, chatID int64, parts []string) {
 	if len(parts) >= 2 {
 		date, err := time.Parse("2006-01-02", parts[1])
 		if err != nil {
-			b.send(ctx, chatID, "Неверный формат даты. Используйте: /checkmail 2026-04-02")
+			b.send(ctx, chatID, "Неверный формат даты. Используйте: `/checkmail 2026-04-02`")
 			return
 		}
 		events, err := b.db.GetEventsByDate(date)
 		if err != nil {
-			b.send(ctx, chatID, fmt.Sprintf("❌ Ошибка получения событий: %v", err))
+			b.send(ctx, chatID, fmt.Sprintf("❌ Ошибка получения событий: `%v`", err))
 			return
 		}
 		if len(events) == 0 {
-			b.send(ctx, chatID, fmt.Sprintf("📭 Событий за %s нет.", parts[1]))
+			b.send(ctx, chatID, fmt.Sprintf("📭 Событий за `%s` нет.", parts[1]))
 			return
 		}
 		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("📋 События за %s:\n", parts[1]))
+		sb.WriteString(fmt.Sprintf("📋 **События за `%s`:**\n\n", parts[1]))
 		for _, e := range events {
 			icon := "✅"
 			if e.Status == "failure" {
@@ -694,7 +699,7 @@ func (b *Bot) cmdCheckMail(ctx context.Context, chatID int64, parts []string) {
 			} else if e.Status == "missed" {
 				icon = "⚠️"
 			}
-			sb.WriteString(fmt.Sprintf("%s %s — %s\n", icon, e.JobName, e.ReceivedAt.Format("15:04")))
+			sb.WriteString(fmt.Sprintf("%s **%s** — `%s`\n", icon, e.JobName, e.ReceivedAt.Format("15:04")))
 		}
 		b.send(ctx, chatID, sb.String())
 		return
@@ -727,13 +732,13 @@ func (b *Bot) cmdCheckErrors(ctx context.Context, chatID int64) {
 		return
 	}
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("⚠️ Проблемы за последние 24ч (%d):\n", len(events)))
+	sb.WriteString(fmt.Sprintf("⚠️ **Проблемы за последние 24ч** (%d):\n\n", len(events)))
 	for _, e := range events {
 		icon := "❌"
 		if e.Status == "missed" {
 			icon = "⚠️"
 		}
-		sb.WriteString(fmt.Sprintf("%s %s — %s\n", icon, e.JobName, e.ReceivedAt.Format("02.01 15:04")))
+		sb.WriteString(fmt.Sprintf("%s **%s** — `%s`\n", icon, e.JobName, e.ReceivedAt.Format("02.01 15:04")))
 	}
 	b.send(ctx, chatID, sb.String())
 }
@@ -743,7 +748,7 @@ var weekdays = []string{"Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"}
 func (b *Bot) cmdWorkdays(ctx context.Context, chatID int64, orgName string) {
 	org, err := b.db.GetOrgByName(orgName)
 	if err != nil || org == nil {
-		b.send(ctx, chatID, fmt.Sprintf("Организация %q не найдена.", orgName))
+		b.send(ctx, chatID, fmt.Sprintf("Организация **%s** не найдена.", orgName))
 		return
 	}
 
@@ -781,7 +786,7 @@ func (b *Bot) buildWorkdaysMessage(org *db.Organization) (string, *maxbot.Keyboa
 		}
 		status = strings.Join(names, ", ")
 	}
-	msg := fmt.Sprintf("Рабочие дни для %q: %s\nНажмите день чтобы включить/выключить:", org.Name, status)
+	msg := fmt.Sprintf("🗓 **Рабочие дни для %s:**\n`%s`\nНажмите день чтобы включить/выключить:", org.Name, status)
 	return msg, kb
 }
 
@@ -946,32 +951,32 @@ func (b *Bot) registerCommands(ctx context.Context) {
 
 func (b *Bot) cmdCommands(ctx context.Context, chatID int64, isAdmin bool) {
 	var sb strings.Builder
-	sb.WriteString("📋 Доступные команды:\n\n")
+	sb.WriteString("📋 **Доступные команды:**\n\n")
 
-	sb.WriteString("*Для пользователей:*\n")
-	sb.WriteString("/stats — статистика за 7 и 30 дней\n")
-	sb.WriteString("/last — последние 10 событий\n")
-	sb.WriteString("/myorgs — мои организации\n")
-	sb.WriteString("/subscribe <org> — подписаться\n")
-	sb.WriteString("/unsubscribe <org> — отписаться\n")
+	sb.WriteString("**Для пользователей:**\n")
+	sb.WriteString("`/stats` — статистика за 7 и 30 дней\n")
+	sb.WriteString("`/last` — последние 10 событий\n")
+	sb.WriteString("`/myorgs` — мои организации\n")
+	sb.WriteString("`/subscribe <org>` — подписаться\n")
+	sb.WriteString("`/unsubscribe <org>` — отписаться\n")
 
 	if isAdmin {
-		sb.WriteString("\n*Администратор:*\n")
-		sb.WriteString("/pending — ожидающие заявки\n")
-		sb.WriteString("/approve <id> — одобрить пользователя\n")
-		sb.WriteString("/reject <id> — отклонить пользователя\n")
-		sb.WriteString("/deactivate <id> — деактивировать пользователя\n")
-		sb.WriteString("/users — список активных пользователей\n")
-		sb.WriteString("/orgs — список организаций и задач\n")
-		sb.WriteString("/addorg <name> — создать организацию\n")
-		sb.WriteString("/setorg \"<job>\" <org> — привязать задачу к орг.\n")
-		sb.WriteString("/workdays <org> — настроить рабочие дни\n")
-		sb.WriteString("/checkerrors — ошибки за последние 24ч\n")
-		sb.WriteString("/checkmail — проверить почту сейчас\n")
-		sb.WriteString("/checkmail <дата> — события за дату (2026-04-02)\n")
-		sb.WriteString("/backupdb — отправить бэкап БД\n")
-		sb.WriteString("/version — текущая версия\n")
-		sb.WriteString("/update — обновить бота\n")
+		sb.WriteString("\n**Администратор:**\n")
+		sb.WriteString("`/pending` — ожидающие заявки\n")
+		sb.WriteString("`/approve <id>` — одобрить пользователя\n")
+		sb.WriteString("`/reject <id>` — отклонить пользователя\n")
+		sb.WriteString("`/deactivate <id>` — деактивировать пользователя\n")
+		sb.WriteString("`/users` — список активных пользователей\n")
+		sb.WriteString("`/orgs` — список организаций и задач\n")
+		sb.WriteString("`/addorg <name>` — создать организацию\n")
+		sb.WriteString("`/setorg \"<job>\" <org>` — привязать задачу к орг.\n")
+		sb.WriteString("`/workdays <org>` — настроить рабочие дни\n")
+		sb.WriteString("`/checkerrors` — ошибки за последние 24ч\n")
+		sb.WriteString("`/checkmail` — проверить почту сейчас\n")
+		sb.WriteString("`/checkmail <дата>` — события за дату\n")
+		sb.WriteString("`/backupdb` — отправить бэкап БД\n")
+		sb.WriteString("`/version` — текущая версия\n")
+		sb.WriteString("`/update` — обновить бота\n")
 	}
 
 	b.send(ctx, chatID, sb.String())
@@ -987,13 +992,13 @@ func (b *Bot) cmdBackupDB(ctx context.Context, chatID int64) {
 func (b *Bot) cmdVersion(ctx context.Context, chatID int64) {
 	latest, err := updater.CheckLatestVersion(ctx)
 	if err != nil {
-		b.send(ctx, chatID, fmt.Sprintf("Текущая версия: %s\n⚠️ Не удалось проверить последнюю версию: %v", b.version, err))
+		b.send(ctx, chatID, fmt.Sprintf("Текущая версия: `%s`\n⚠️ Не удалось проверить последнюю версию: `%v`", b.version, err))
 		return
 	}
 	if strings.TrimPrefix(latest, "v") == strings.TrimPrefix(b.version, "v") {
-		b.send(ctx, chatID, fmt.Sprintf("✅ Установлена последняя версия: %s", b.version))
+		b.send(ctx, chatID, fmt.Sprintf("✅ Установлена последняя версия: `%s`", b.version))
 	} else {
-		b.send(ctx, chatID, fmt.Sprintf("Текущая версия: %s\n🆕 Доступна новая версия: %s\nОбновить: /update", b.version, latest))
+		b.send(ctx, chatID, fmt.Sprintf("Текущая версия: `%s`\n🆕 Доступна новая версия: `%s`\nОбновить: `/update`", b.version, latest))
 	}
 }
 
@@ -1005,18 +1010,18 @@ func (b *Bot) cmdUpdate(ctx context.Context, chatID int64) {
 	}
 
 	if strings.TrimPrefix(latest, "v") == strings.TrimPrefix(b.version, "v") {
-		b.send(ctx, chatID, fmt.Sprintf("✅ Уже установлена последняя версия: %s", b.version))
+		b.send(ctx, chatID, fmt.Sprintf("✅ Уже установлена последняя версия: `%s`", b.version))
 		return
 	}
 
-	b.send(ctx, chatID, fmt.Sprintf("⬇️ Скачиваю версию %s...", latest))
+	b.send(ctx, chatID, fmt.Sprintf("⬇️ Скачиваю версию `%s`...", latest))
 
 	if err := updater.Update(ctx, b.version, b.isService, "MaxNotificationBot"); err != nil {
-		b.send(ctx, chatID, fmt.Sprintf("❌ Ошибка обновления: %v", err))
+		b.send(ctx, chatID, fmt.Sprintf("❌ Ошибка обновления: `%v`", err))
 		return
 	}
 
-	b.send(ctx, chatID, fmt.Sprintf("✅ Версия %s скачана. Перезапускаюсь...", latest))
+	b.send(ctx, chatID, fmt.Sprintf("✅ Версия `%s` скачана. Перезапускаюсь...", latest))
 	log.Printf("[BOT] запуск обновления до %s, завершение процесса", latest)
 	b.stop()
 }
