@@ -36,8 +36,8 @@ jobs:
         run: |
           IFS=',' read -ra IDS <<< "$MAX_ADMIN_IDS"
           for ID in "${IDS[@]}"; do
-            curl -s -X POST "https://botapi.max.ru/messages" \
+            curl -s -X POST "https://botapi.max.ru/messages?user_id=$ID" \
               -H "Authorization: $MAX_BOT_TOKEN" \
               -H "Content-Type: application/json" \
-              -d "{\"recipient\":{\"user_id\":$ID},\"body\":{\"text\":\"🚀 Вышла новая версия бота: $VERSION\nСкачать: /update\"}}"
+              -d "{\"text\":\"🚀 Вышла новая версия бота: $VERSION\nСкачать: /update\"}"
           done
