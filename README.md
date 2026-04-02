@@ -257,7 +257,30 @@ MyJob: ✅ 24  ❌ 2  ⚠️ 1
 3. Действие: запустить `max-notification.exe` с указанием рабочей папки
 4. Поставить галку «Выполнять независимо от регистрации пользователя»
 
-### Через NSSM (рекомендуется)
+### Через sc.exe (встроен в Windows, рекомендуется)
+
+Бот поддерживает нативный запуск как Windows-служба. Выполнить от имени администратора:
+
+```cmd
+sc create MaxNotificationBot binPath= "C:\path\to\max-notification.exe" start= auto
+sc description MaxNotificationBot "MAX Backup Notifier Bot"
+sc start MaxNotificationBot
+```
+
+Управление службой:
+
+```cmd
+sc stop MaxNotificationBot
+sc start MaxNotificationBot
+sc delete MaxNotificationBot
+```
+
+> **Важно:** рабочая папка службы по умолчанию `C:\Windows\System32`, поэтому в `.env` укажите абсолютный путь к БД:
+> ```env
+> DB_PATH=C:\path\to\data\bot.db
+> ```
+
+### Через NSSM
 
 [NSSM](https://nssm.cc) позволяет запустить бот как службу Windows:
 
