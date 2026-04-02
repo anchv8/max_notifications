@@ -104,6 +104,7 @@ move "%s" "%s"
 move "%s" "%s"
 start "" "%s"
 del "%%~f0"
+exit
 `, oldExePath, exePath, oldExePath, newExePath, exePath, exePath)
 
 	if err := os.WriteFile(batPath, []byte(bat), 0755); err != nil {
@@ -111,8 +112,8 @@ del "%%~f0"
 		return fmt.Errorf("создание скрипта обновления: %w", err)
 	}
 
-	// Запустить bat в фоне и завершить текущий процесс
-	cmd := exec.Command("cmd", "/C", "start", "", batPath)
+	// Запустить bat скрытно (без окна) и завершить текущий процесс
+	cmd := exec.Command("cmd", "/C", "start", "/min", "", batPath)
 	if err := cmd.Start(); err != nil {
 		os.Remove(newExePath)
 		os.Remove(batPath)
