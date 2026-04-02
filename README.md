@@ -11,6 +11,7 @@
 - [Запуск](#запуск)
 - [Команды бота](#команды-бота)
 - [Как это работает](#как-это-работает)
+- [Архитектура](#архитектура)
 - [Автозапуск на Windows](#автозапуск-на-windows)
 
 ---
@@ -244,6 +245,143 @@ MyJob: ✅ 24  ❌ 2  ⚠️ 1
 ✅ MyJob — успешно [2026-04-02 14:30]
 ❌ MyJob — ошибка: текст из письма [2026-04-02 14:30]
 ⚠️ MyJob — нет активности 26ч (ожидалось ~12ч) [2026-04-02 14:30]
+```
+
+---
+
+## Архитектура
+
+### Общая схема работы
+
+```mermaid
+flowchart TD
+    ENV[".env / переменные окружения"]
+    CFG["config.Load()"]
+    DB["SQLite база данных"]
+    IMAP["IMAP сервер\n(Яндекс.Почта и др.)"]
+
+    subgraph GOROUTINES["Горутины"]
+        EW["Email Worker\nопрос почты каждые N мин"]
+        WT["Watcher\nпроверка пропусков каждый час"]
+        BS["Backup Scheduler\nбэкап БД по расписанию"]
+    end
+
+    CH["chan email.Event\n(буфер 100)"]
+
+    subgraph BOT["Bot.Run() — главный цикл"]
+        EV["handleEvent()\nрассылка уведомлений"]
+        MSG["handleMessage()\nобработка команд"]
+        CB["handleCallback()\nобработка кнопок"]
+        SM["State Machine\nожидание ввода"]
+    end
+
+    MAX["MAX Bot API\nGetUpdates()"]
+    ADMINS["Администраторы"]
+    USERS["Подписчики"]
+
+    ENV --> CFG
+    CFG --> DB
+    CFG --> EW
+    CFG --> BS
+
+    IMAP -->|"Новые письма"| EW
+    EW -->|"email.Event"| CH
+    WT -->|"email.Event (missed)"| CH
+
+    CH -->|"события"| EV
+    MAX -->|"MessageCreatedUpdate"| MSG
+    MAX -->|"MessageCallbackUpdate"| CB
+
+    EV --> ADMINS
+    EV --> USERS
+    MSG --> DB
+    CB --> DB
+    CB --> SM
+    SM -->|"ввод названия орг"| DB
+
+    BS -->|"файл bot.db"| ADMINS
+```
+
+### Поток обработки письма
+
+```mermaid
+flowchart LR
+    MAIL["📧 Новое письмо\n(unseen)"]
+    DECODE["Декодирование\nтемы (KOI8-R, UTF-8)"]
+    PARSE["Парсинг статуса\nошибка / успех"]
+    JOB["GetOrCreateJob()\nрегистрация задачи"]
+    SAVE["SaveEvent()\nсохранение в БД"]
+    MARK["Пометить как\nпрочитанное"]
+    SEND["Отправка\nв канал событий"]
+    NEW{"Новая\nзадача?"}
+    BIND["Кнопки привязки\nк организации"]
+
+    MAIL --> DECODE --> PARSE --> JOB --> MARK --> SAVE --> SEND
+    JOB --> NEW
+    NEW -->|"да"| BIND
+    BIND -->|"admin"| ADMINS["Администраторы"]
+    SEND --> BOT["Bot.handleEvent()"]
+```
+
+### Маршрутизация команд
+
+```mermaid
+flowchart TD
+    MSG["Входящее сообщение"]
+    STATE{"Активное\nсостояние?"}
+    HS["handleState()\nобработка ввода"]
+    PUBLIC{"/invite?"}
+    INV["cmdInvite()\nзапрос доступа"]
+    ADMIN{"IsAdmin?"}
+    ACTIVE{"Статус\nactive?"}
+    IGNORE["Игнорировать"]
+
+    subgraph ADMIN_CMDS["Команды администратора"]
+        A1["/pending /approve /reject /deactivate"]
+        A2["/users /orgs /addorg /setorg"]
+        A3["/checkmail /checkerrors /workdays"]
+        A4["/backupdb /version /update"]
+    end
+
+    subgraph USER_CMDS["Команды пользователя"]
+        U1["/commands /stats /last"]
+        U2["/myorgs /subscribe /unsubscribe"]
+    end
+
+    MSG --> STATE
+    STATE -->|"да"| HS
+    STATE -->|"нет"| PUBLIC
+    PUBLIC -->|"да"| INV
+    PUBLIC -->|"нет"| ADMIN
+    ADMIN -->|"да"| ADMIN_CMDS
+    ADMIN -->|"нет"| ACTIVE
+    ACTIVE -->|"да"| USER_CMDS
+    ACTIVE -->|"нет"| IGNORE
+```
+
+### Структура модулей
+
+```mermaid
+flowchart LR
+    MAIN["main.go"]
+    CFG["internal/config"]
+    DB["internal/db"]
+    EMAIL["internal/email\nworker + parser"]
+    BOT["internal/bot\nbot + watcher + backup + state"]
+    UPD["internal/updater"]
+    SVC["winsvc_windows.go"]
+
+    MAIN --> CFG
+    MAIN --> DB
+    MAIN --> EMAIL
+    MAIN --> BOT
+    MAIN --> SVC
+    BOT --> DB
+    BOT --> EMAIL
+    BOT --> UPD
+    EMAIL --> DB
+    BOT --> CFG
+    EMAIL --> CFG
 ```
 
 ---
