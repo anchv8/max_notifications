@@ -45,6 +45,17 @@ func (w *Watcher) check(ctx context.Context) {
 	for _, job := range stalled {
 		j := job // копия для замыкания
 
+		// Пропускаем если для организации сегодня нерабочий день
+		if j.OrgID != nil {
+			isWorkday, err := w.db.IsWorkday(*j.OrgID)
+			if err != nil {
+				log.Printf("[WATCHER] ошибка проверки рабочего дня для org=%d: %v", *j.OrgID, err)
+			} else if !isWorkday {
+				log.Printf("[WATCHER] пропускаем %q — сегодня нерабочий день", j.JobName)
+				continue
+			}
+		}
+
 		hoursGone := time.Since(*j.LastSeenAt).Hours()
 		expected := *j.AvgIntervalHours
 

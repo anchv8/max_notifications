@@ -2,20 +2,23 @@ package email
 
 import "strings"
 
-// ParseStatus определяет статус бэкапа по тексту письма.
+// errorKeywords — ключевые слова, указывающие на ошибку бэкапа.
+// Проверяются в теме и теле письма; если ни одно не найдено — успех.
+var errorKeywords = []string{
+	"error", "failure", "failed",
+	"ошибка", "сбой", "не удалось", "завершено с ошибками",
+}
+
+// ParseStatus определяет статус бэкапа по теме и телу письма.
 // Возвращает "success" или "failure".
-func ParseStatus(body string) string {
-	lower := strings.ToLower(body)
-	successKeywords := []string{
-		"successfully", "успешно", "завершено успешно", "completed successfully",
-		"backup completed", "резервное копирование завершено",
-	}
-	for _, kw := range successKeywords {
-		if strings.Contains(lower, kw) {
-			return "success"
+func ParseStatus(subject, body string) string {
+	combined := strings.ToLower(subject + " " + body)
+	for _, kw := range errorKeywords {
+		if strings.Contains(combined, kw) {
+			return "failure"
 		}
 	}
-	return "failure"
+	return "success"
 }
 
 // TruncateMessage обрезает сообщение до maxLen символов.

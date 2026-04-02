@@ -1,3 +1,4 @@
 .env
 max-echo-bot
 *.exe
+github_token.txt

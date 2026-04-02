@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"mime/quotedprintable"
 	"strings"
+
+	"golang.org/x/text/encoding/charmap"
 	"time"
 
 	"github.com/emersion/go-imap/v2"
@@ -48,39 +51,59 @@ func (w *Worker) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			w.poll(ctx)
+			w.poll(ctx) //nolint:errcheck
 		}
 	}
 }
 
-func (w *Worker) poll(ctx context.Context) {
+// Poll запускает одну проверку почты вручную, возвращает кол-во обработанных писем и ошибку.
+func (w *Worker) Poll(ctx context.Context) (int, error) {
+	return w.poll(ctx)
+}
+
+// TestConnection проверяет подключение к IMAP без обработки писем.
+func (w *Worker) TestConnection() error {
+	addr := fmt.Sprintf("%s:%s", w.cfg.IMAPHost, w.cfg.IMAPPort)
+	c, err := imapclient.DialTLS(addr, nil)
+	if err != nil {
+		return fmt.Errorf("подключение: %w", err)
+	}
+	defer c.Close()
+
+	if err := c.Login(w.cfg.IMAPUser, w.cfg.IMAPPassword).Wait(); err != nil {
+		return fmt.Errorf("авторизация: %w", err)
+	}
+	return nil
+}
+
+func (w *Worker) poll(ctx context.Context) (int, error) {
 	addr := fmt.Sprintf("%s:%s", w.cfg.IMAPHost, w.cfg.IMAPPort)
 	c, err := imapclient.DialTLS(addr, nil)
 	if err != nil {
 		log.Printf("[EMAIL] ошибка подключения к IMAP: %v", err)
-		return
+		return 0, fmt.Errorf("подключение: %w", err)
 	}
 	defer c.Close()
 
 	if err := c.Login(w.cfg.IMAPUser, w.cfg.IMAPPassword).Wait(); err != nil {
 		log.Printf("[EMAIL] ошибка входа: %v", err)
-		return
+		return 0, fmt.Errorf("авторизация: %w", err)
 	}
 
-	if _, err := c.Select("INBOX", nil).Wait(); err != nil {
-		log.Printf("[EMAIL] ошибка выбора INBOX: %v", err)
-		return
+	if _, err := c.Select(w.cfg.IMAPFolder, nil).Wait(); err != nil {
+		log.Printf("[EMAIL] ошибка выбора папки %s: %v", w.cfg.IMAPFolder, err)
+		return 0, fmt.Errorf("выбор папки: %w", err)
 	}
 
 	searchData, err := c.UIDSearch(&imap.SearchCriteria{NotFlag: []imap.Flag{imap.FlagSeen}}, nil).Wait()
 	if err != nil {
 		log.Printf("[EMAIL] ошибка поиска писем: %v", err)
-		return
+		return 0, fmt.Errorf("поиск писем: %w", err)
 	}
 
 	uids := searchData.AllUIDs()
 	if len(uids) == 0 {
-		return
+		return 0, nil
 	}
 
 	log.Printf("[EMAIL] найдено %d непрочитанных писем", len(uids))
@@ -94,15 +117,16 @@ func (w *Worker) poll(ctx context.Context) {
 	}).Collect()
 	if err != nil {
 		log.Printf("[EMAIL] ошибка получения писем: %v", err)
-		return
+		return 0, fmt.Errorf("получение писем: %w", err)
 	}
 
+	processed := 0
 	for _, msg := range messages {
 		if msg.Envelope == nil {
 			continue
 		}
 
-		subject := msg.Envelope.Subject
+		subject := decodeSubject(msg.Envelope.Subject)
 		bodyBytes := msg.FindBodySection(bodySection)
 		body := decodeBody(bodyBytes, msg)
 
@@ -117,7 +141,7 @@ func (w *Worker) poll(ctx context.Context) {
 			log.Printf("[EMAIL] ошибка пометки письма как прочитанного: %v", err)
 		}
 
-		status := ParseStatus(body)
+		status := ParseStatus(subject, body)
 		message := TruncateMessage(body, 500)
 
 		job, isNew, err := w.db.GetOrCreateJob(subject)
@@ -137,13 +161,15 @@ func (w *Worker) poll(ctx context.Context) {
 		}
 
 		event.JobName = subject
+		processed++
 
 		select {
 		case w.events <- Event{Job: job, Event: event, IsNewJob: isNew}:
 		case <-ctx.Done():
-			return
+			return processed, nil
 		}
 	}
+	return processed, nil
 }
 
 func decodeBody(raw []byte, _ *imapclient.FetchMessageBuffer) string {
@@ -160,4 +186,30 @@ func decodeBody(raw []byte, _ *imapclient.FetchMessageBuffer) string {
 	}
 	// Return as-is
 	return string(raw)
+}
+
+func charsetReader(charset string, input io.Reader) (io.Reader, error) {
+	switch strings.ToLower(charset) {
+	case "koi8-r":
+		return charmap.KOI8R.NewDecoder().Reader(input), nil
+	case "koi8-u":
+		return charmap.KOI8U.NewDecoder().Reader(input), nil
+	case "windows-1251", "cp1251":
+		return charmap.Windows1251.NewDecoder().Reader(input), nil
+	case "iso-8859-1", "latin-1":
+		return charmap.ISO8859_1.NewDecoder().Reader(input), nil
+	default:
+		return input, nil
+	}
+}
+
+func decodeSubject(s string) string {
+	dec := &mime.WordDecoder{
+		CharsetReader: charsetReader,
+	}
+	decoded, err := dec.DecodeHeader(s)
+	if err != nil {
+		return s
+	}
+	return decoded
 }

@@ -98,6 +98,11 @@ func (d *DB) migrate() error {
 			message     TEXT,
 			received_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);
+		CREATE TABLE IF NOT EXISTS org_workdays (
+			org_id INTEGER NOT NULL REFERENCES organizations(id),
+			day    INTEGER NOT NULL CHECK(day >= 1 AND day <= 7),
+			PRIMARY KEY (org_id, day)
+		);
 	`)
 	return err
 }
@@ -168,6 +173,16 @@ func (d *DB) CreateOrg(name string) error {
 func (d *DB) GetOrgByName(name string) (*Organization, error) {
 	o := &Organization{}
 	err := d.conn.QueryRow(`SELECT id, name FROM organizations WHERE name = ?`, name).
+		Scan(&o.ID, &o.Name)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return o, err
+}
+
+func (d *DB) GetOrgByID(id int64) (*Organization, error) {
+	o := &Organization{}
+	err := d.conn.QueryRow(`SELECT id, name FROM organizations WHERE id = ?`, id).
 		Scan(&o.ID, &o.Name)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -541,10 +556,126 @@ func (d *DB) GetLastEvents(orgIDs []int64, limit int) ([]BackupEvent, error) {
 	return events, rows.Err()
 }
 
+// --- Workdays ---
+
+// GetOrgWorkdays возвращает список рабочих дней для организации (1=Пн, 7=Вс).
+func (d *DB) GetOrgWorkdays(orgID int64) ([]int, error) {
+	rows, err := d.conn.Query(`SELECT day FROM org_workdays WHERE org_id = ? ORDER BY day`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var days []int
+	for rows.Next() {
+		var day int
+		if err := rows.Scan(&day); err != nil {
+			return nil, err
+		}
+		days = append(days, day)
+	}
+	return days, rows.Err()
+}
+
+// ToggleOrgWorkday переключает рабочий день для организации (добавляет если нет, удаляет если есть).
+// Возвращает true если день был добавлен, false если удалён.
+func (d *DB) ToggleOrgWorkday(orgID int64, day int) (bool, error) {
+	var count int
+	err := d.conn.QueryRow(`SELECT COUNT(*) FROM org_workdays WHERE org_id = ? AND day = ?`, orgID, day).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	if count > 0 {
+		_, err = d.conn.Exec(`DELETE FROM org_workdays WHERE org_id = ? AND day = ?`, orgID, day)
+		return false, err
+	}
+	_, err = d.conn.Exec(`INSERT INTO org_workdays (org_id, day) VALUES (?, ?)`, orgID, day)
+	return true, err
+}
+
+// IsWorkday возвращает true если для организации настроены рабочие дни и сегодня — рабочий.
+// Если рабочие дни не заданы, считается что все дни рабочие.
+func (d *DB) IsWorkday(orgID int64) (bool, error) {
+	days, err := d.GetOrgWorkdays(orgID)
+	if err != nil {
+		return false, err
+	}
+	if len(days) == 0 {
+		return true, nil // не задано — всегда рабочий
+	}
+	today := int(time.Now().Weekday())
+	if today == 0 {
+		today = 7 // Sunday = 7
+	}
+	for _, d := range days {
+		if d == today {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// --- Events ---
+
+// GetRecentErrors возвращает события со статусом failure/missed за последние N часов.
+func (d *DB) GetRecentErrors(hours int) ([]BackupEvent, error) {
+	rows, err := d.conn.Query(`
+		SELECT be.id, be.job_id, j.job_name, be.status, COALESCE(be.message,''), be.received_at
+		FROM backup_events be
+		JOIN jobs j ON j.id = be.job_id
+		WHERE be.status IN ('failure', 'missed')
+		  AND (julianday('now') - julianday(be.received_at)) * 24 <= ?
+		ORDER BY be.received_at DESC
+	`, hours)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var events []BackupEvent
+	for rows.Next() {
+		var e BackupEvent
+		var receivedAt string
+		if err := rows.Scan(&e.ID, &e.JobID, &e.JobName, &e.Status, &e.Message, &receivedAt); err != nil {
+			return nil, err
+		}
+		e.ReceivedAt = parseTime(receivedAt)
+		events = append(events, e)
+	}
+	return events, rows.Err()
+}
+
+// GetEventsByDate возвращает все события за указанную дату (по received_at).
+func (d *DB) GetEventsByDate(date time.Time) ([]BackupEvent, error) {
+	dateStr := date.Format("2006-01-02")
+	rows, err := d.conn.Query(`
+		SELECT be.id, be.job_id, j.job_name, be.status, COALESCE(be.message,''), be.received_at
+		FROM backup_events be
+		JOIN jobs j ON j.id = be.job_id
+		WHERE date(be.received_at) = ?
+		ORDER BY be.received_at ASC
+	`, dateStr)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var events []BackupEvent
+	for rows.Next() {
+		var e BackupEvent
+		var receivedAt string
+		if err := rows.Scan(&e.ID, &e.JobID, &e.JobName, &e.Status, &e.Message, &receivedAt); err != nil {
+			return nil, err
+		}
+		e.ReceivedAt = parseTime(receivedAt)
+		events = append(events, e)
+	}
+	return events, rows.Err()
+}
+
 // parseTime parses SQLite DATETIME strings into time.Time.
 // SQLite stores DATETIME as "2006-01-02 15:04:05" (UTC).
 func parseTime(s string) time.Time {
 	formats := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
 		"2006-01-02 15:04:05",
 		"2006-01-02T15:04:05Z",
 		"2006-01-02T15:04:05",

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	maxbot "github.com/max-messenger/max-bot-api-client-go"
 	"github.com/max-messenger/max-bot-api-client-go/schemes"
@@ -12,21 +13,41 @@ import (
 	"max-echo-bot/internal/config"
 	"max-echo-bot/internal/db"
 	"max-echo-bot/internal/email"
+	"max-echo-bot/internal/updater"
 )
 
 type Bot struct {
-	api    *maxbot.Api
-	cfg    *config.Config
-	db     *db.DB
-	events <-chan email.Event
+	api     *maxbot.Api
+	cfg     *config.Config
+	db      *db.DB
+	events  <-chan email.Event
+	worker  *email.Worker
+	version string
+	stop    context.CancelFunc
 }
 
-func NewBot(api *maxbot.Api, cfg *config.Config, database *db.DB, events <-chan email.Event) *Bot {
-	return &Bot{api: api, cfg: cfg, db: database, events: events}
+func NewBot(api *maxbot.Api, cfg *config.Config, database *db.DB, events <-chan email.Event, worker *email.Worker, version string) *Bot {
+	return &Bot{api: api, cfg: cfg, db: database, events: events, worker: worker, version: version}
 }
 
-// Run запускает бота: обрабатывает команды и рассылает уведомления.
+// Run запускает бота: тест почты, обработка команд и рассылка уведомлений.
 func (b *Bot) Run(ctx context.Context) {
+	ctx, b.stop = context.WithCancel(ctx)
+	// Тест подключения к IMAP при старте
+	if err := b.worker.TestConnection(); err != nil {
+		msg := fmt.Sprintf("⚠️ Не удалось подключиться к почте при старте: %v", err)
+		log.Printf("[BOT] %s", msg)
+		for _, id := range b.cfg.AdminUserIDs {
+			b.sendToUser(ctx, id, msg)
+		}
+	} else {
+		msg := fmt.Sprintf("✅ Бот запущен. Почта %s подключена.", b.cfg.IMAPUser)
+		log.Printf("[BOT] %s", msg)
+		for _, id := range b.cfg.AdminUserIDs {
+			b.sendToUser(ctx, id, msg)
+		}
+	}
+
 	updates := b.api.GetUpdates(ctx)
 	for {
 		select {
@@ -41,24 +62,34 @@ func (b *Bot) Run(ctx context.Context) {
 			if !ok {
 				return
 			}
-			if msg, ok := upd.(*schemes.MessageCreatedUpdate); ok {
-				b.handleMessage(ctx, msg)
+			switch u := upd.(type) {
+			case *schemes.MessageCreatedUpdate:
+				b.handleMessage(ctx, u)
+			case *schemes.MessageCallbackUpdate:
+				b.handleCallback(ctx, u)
 			}
 		}
 	}
 }
 
-// send отправляет сообщение в чат.
+// send отправляет сообщение в чат (для ответов на входящие сообщения).
 func (b *Bot) send(ctx context.Context, chatID int64, text string) {
 	if err := b.api.Messages.Send(ctx, maxbot.NewMessage().SetChat(chatID).SetText(text)); err != nil {
 		log.Printf("[BOT] ошибка отправки в chat=%d: %v", chatID, err)
 	}
 }
 
+// sendToUser отправляет сообщение конкретному пользователю по его userID.
+func (b *Bot) sendToUser(ctx context.Context, userID int64, text string) {
+	if err := b.api.Messages.Send(ctx, maxbot.NewMessage().SetUser(userID).SetText(text)); err != nil {
+		log.Printf("[BOT] ошибка отправки пользователю user=%d: %v", userID, err)
+	}
+}
+
 // broadcast рассылает сообщение списку пользователей.
 func (b *Bot) broadcast(ctx context.Context, userIDs []int64, text string) {
 	for _, uid := range userIDs {
-		b.send(ctx, uid, text)
+		b.sendToUser(ctx, uid, text)
 	}
 }
 
@@ -75,8 +106,13 @@ func (b *Bot) handleEvent(ctx context.Context, ev email.Event) {
 		text = fmt.Sprintf("⚠️ %s — %s [%s]", ev.Event.JobName, ev.Event.Message, ts)
 	}
 
-	// Уведомить администратора всегда
-	recipients := []int64{b.cfg.AdminUserID}
+	// Уведомить всех администраторов всегда
+	seen := make(map[int64]bool)
+	recipients := make([]int64, 0, len(b.cfg.AdminUserIDs))
+	for _, id := range b.cfg.AdminUserIDs {
+		seen[id] = true
+		recipients = append(recipients, id)
+	}
 
 	// Если задача привязана к организации — уведомить подписчиков
 	if ev.Job.OrgID != nil {
@@ -85,7 +121,8 @@ func (b *Bot) handleEvent(ctx context.Context, ev email.Event) {
 			log.Printf("[BOT] ошибка получения подписчиков: %v", err)
 		}
 		for _, u := range subs {
-			if u.ID != b.cfg.AdminUserID {
+			if !seen[u.ID] {
+				seen[u.ID] = true
 				recipients = append(recipients, u.ID)
 			}
 		}
@@ -93,12 +130,15 @@ func (b *Bot) handleEvent(ctx context.Context, ev email.Event) {
 
 	b.broadcast(ctx, recipients, text)
 
-	// Уведомить администратора о новой задаче
+	// Уведомить всех администраторов о новой задаче
 	if ev.IsNewJob {
-		b.send(ctx, b.cfg.AdminUserID, fmt.Sprintf(
+		msg := fmt.Sprintf(
 			"⚙️ Новая задача зарегистрирована: %q. Привяжите её к организации:\n/setorg \"%s\" <org_name>",
 			ev.Job.JobName, ev.Job.JobName,
-		))
+		)
+		for _, id := range b.cfg.AdminUserIDs {
+			b.sendToUser(ctx, id, msg)
+		}
 	}
 }
 
@@ -128,15 +168,29 @@ func (b *Bot) handleMessage(ctx context.Context, upd *schemes.MessageCreatedUpda
 		return
 	}
 
-	// Проверка что пользователь активен
-	user, err := b.db.GetUser(userID)
-	if err != nil {
-		log.Printf("[BOT] ошибка получения пользователя %d: %v", userID, err)
-		return
+	// Администратор всегда имеет доступ ко всем командам
+	isAdmin := b.cfg.IsAdmin(userID)
+
+	if !isAdmin {
+		// Проверка что пользователь активен
+		user, err := b.db.GetUser(userID)
+		if err != nil {
+			log.Printf("[BOT] ошибка получения пользователя %d: %v", userID, err)
+			return
+		}
+		if user == nil || user.Status != "active" {
+			b.send(ctx, chatID, "У вас нет доступа. Отправьте /invite для запроса.")
+			return
+		}
 	}
-	if user == nil || user.Status != "active" {
-		b.send(ctx, chatID, "У вас нет доступа. Отправьте /invite для запроса.")
-		return
+
+	// Команды администратора
+	if isAdmin {
+		switch cmd {
+		case "/pending", "/approve", "/reject", "/users", "/orgs", "/addorg", "/setorg", "/checkmail", "/workdays", "/checkerrors", "/update", "/version":
+			b.handleAdminCmd(ctx, chatID, cmd, parts)
+			return
+		}
 	}
 
 	// Команды для активных пользователей
@@ -160,12 +214,7 @@ func (b *Bot) handleMessage(ctx context.Context, upd *schemes.MessageCreatedUpda
 		}
 		b.cmdUnsubscribe(ctx, chatID, userID, strings.Join(parts[1:], " "))
 	default:
-		// Проверяем команды администратора
-		if userID != b.cfg.AdminUserID {
-			b.send(ctx, chatID, "Неизвестная команда.")
-			return
-		}
-		b.handleAdminCmd(ctx, chatID, cmd, parts)
+		b.send(ctx, chatID, "Неизвестная команда.")
 	}
 }
 
@@ -197,6 +246,20 @@ func (b *Bot) handleAdminCmd(ctx context.Context, chatID int64, cmd string, part
 		b.cmdAddOrg(ctx, chatID, strings.Join(parts[1:], " "))
 	case "/setorg":
 		b.cmdSetOrg(ctx, chatID, parts)
+	case "/version":
+		b.cmdVersion(ctx, chatID)
+	case "/update":
+		b.cmdUpdate(ctx, chatID)
+	case "/checkmail":
+		b.cmdCheckMail(ctx, chatID, parts)
+	case "/checkerrors":
+		b.cmdCheckErrors(ctx, chatID)
+	case "/workdays":
+		if len(parts) < 2 {
+			b.send(ctx, chatID, "Использование: /workdays <org_name>")
+			return
+		}
+		b.cmdWorkdays(ctx, chatID, strings.Join(parts[1:], " "))
 	default:
 		b.send(ctx, chatID, "Неизвестная команда.")
 	}
@@ -231,10 +294,12 @@ func (b *Bot) cmdInvite(ctx context.Context, chatID, userID int64, name, usernam
 	if username != "" {
 		usernameStr = " (@" + username + ")"
 	}
-	b.send(ctx, b.cfg.AdminUserID, fmt.Sprintf(
-		"👤 Новый запрос доступа: %s%s (id: %d)\n/approve %d или /reject %d",
-		name, usernameStr, userID, userID, userID,
-	))
+	for _, id := range b.cfg.AdminUserIDs {
+		b.sendToUser(ctx, id, fmt.Sprintf(
+			"👤 Новый запрос доступа: %s%s (id: %d)\n/approve %d или /reject %d",
+			name, usernameStr, userID, userID, userID,
+		))
+	}
 }
 
 func (b *Bot) cmdStats(ctx context.Context, chatID, userID int64) {
@@ -250,7 +315,7 @@ func (b *Bot) cmdStats(ctx context.Context, chatID, userID int64) {
 	}
 
 	// Администратор видит всё
-	if userID == b.cfg.AdminUserID {
+	if b.cfg.IsAdmin(userID) {
 		orgIDs = nil
 	}
 
@@ -287,7 +352,7 @@ func (b *Bot) cmdLast(ctx context.Context, chatID, userID int64) {
 	for _, o := range orgs {
 		orgIDs = append(orgIDs, o.ID)
 	}
-	if userID == b.cfg.AdminUserID {
+	if b.cfg.IsAdmin(userID) {
 		orgIDs = nil
 	}
 
@@ -404,7 +469,7 @@ func (b *Bot) cmdApproveReject(ctx context.Context, chatID int64, userIDStr, sta
 		userNotif = "Ваша заявка была отклонена."
 	}
 	b.send(ctx, chatID, fmt.Sprintf("Пользователь %s %s.", user.Name, action))
-	b.send(ctx, targetID, userNotif)
+	b.sendToUser(ctx, targetID, userNotif)
 }
 
 func (b *Bot) cmdUsers(ctx context.Context, chatID int64) {
@@ -529,4 +594,203 @@ func (b *Bot) cmdSetOrg(ctx context.Context, chatID int64, parts []string) {
 		return
 	}
 	b.send(ctx, chatID, fmt.Sprintf("Задача %q привязана к организации %q.", jobName, orgName))
+}
+
+func (b *Bot) cmdCheckMail(ctx context.Context, chatID int64, parts []string) {
+	// /checkmail <дата> — показать события из БД за дату
+	if len(parts) >= 2 {
+		date, err := time.Parse("2006-01-02", parts[1])
+		if err != nil {
+			b.send(ctx, chatID, "Неверный формат даты. Используйте: /checkmail 2026-04-02")
+			return
+		}
+		events, err := b.db.GetEventsByDate(date)
+		if err != nil {
+			b.send(ctx, chatID, fmt.Sprintf("❌ Ошибка получения событий: %v", err))
+			return
+		}
+		if len(events) == 0 {
+			b.send(ctx, chatID, fmt.Sprintf("📭 Событий за %s нет.", parts[1]))
+			return
+		}
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("📋 События за %s:\n", parts[1]))
+		for _, e := range events {
+			icon := "✅"
+			if e.Status == "failure" {
+				icon = "❌"
+			} else if e.Status == "missed" {
+				icon = "⚠️"
+			}
+			sb.WriteString(fmt.Sprintf("%s %s — %s\n", icon, e.JobName, e.ReceivedAt.Format("15:04")))
+		}
+		b.send(ctx, chatID, sb.String())
+		return
+	}
+
+	// /checkmail — ручная проверка почты
+	b.send(ctx, chatID, "📬 Проверяю почту...")
+	go func() {
+		n, err := b.worker.Poll(ctx)
+		if err != nil {
+			b.send(ctx, chatID, fmt.Sprintf("❌ Ошибка проверки почты: %v", err))
+			return
+		}
+		if n == 0 {
+			b.send(ctx, chatID, "📭 Новых писем нет.")
+		} else {
+			b.send(ctx, chatID, fmt.Sprintf("✅ Обработано писем: %d.", n))
+		}
+	}()
+}
+
+func (b *Bot) cmdCheckErrors(ctx context.Context, chatID int64) {
+	events, err := b.db.GetRecentErrors(24)
+	if err != nil {
+		b.send(ctx, chatID, fmt.Sprintf("❌ Ошибка получения данных: %v", err))
+		return
+	}
+	if len(events) == 0 {
+		b.send(ctx, chatID, "✅ Ошибок за последние 24 часа нет.")
+		return
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("⚠️ Проблемы за последние 24ч (%d):\n", len(events)))
+	for _, e := range events {
+		icon := "❌"
+		if e.Status == "missed" {
+			icon = "⚠️"
+		}
+		sb.WriteString(fmt.Sprintf("%s %s — %s\n", icon, e.JobName, e.ReceivedAt.Format("02.01 15:04")))
+	}
+	b.send(ctx, chatID, sb.String())
+}
+
+var weekdays = []string{"Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"}
+
+func (b *Bot) cmdWorkdays(ctx context.Context, chatID int64, orgName string) {
+	org, err := b.db.GetOrgByName(orgName)
+	if err != nil || org == nil {
+		b.send(ctx, chatID, fmt.Sprintf("Организация %q не найдена.", orgName))
+		return
+	}
+
+	msg, kb := b.buildWorkdaysMessage(org)
+	if err := b.api.Messages.Send(ctx, maxbot.NewMessage().SetChat(chatID).SetText(msg).AddKeyboard(kb)); err != nil {
+		log.Printf("[BOT] ошибка отправки workdays: %v", err)
+	}
+}
+
+func (b *Bot) buildWorkdaysMessage(org *db.Organization) (string, *maxbot.Keyboard) {
+	days, _ := b.db.GetOrgWorkdays(org.ID)
+	active := make(map[int]bool, len(days))
+	for _, d := range days {
+		active[d] = true
+	}
+
+	allActive := len(days) == 0
+	kb := &maxbot.Keyboard{}
+	row := kb.AddRow()
+	for i, name := range weekdays {
+		dayNum := i + 1
+		label := name
+		if allActive || active[dayNum] {
+			label = "✅ " + name
+		}
+		payload := fmt.Sprintf("wd:%d:%d", org.ID, dayNum)
+		row.AddCallback(label, schemes.DEFAULT, payload)
+	}
+
+	status := "все дни"
+	if len(days) > 0 {
+		names := make([]string, 0, len(days))
+		for _, d := range days {
+			names = append(names, weekdays[d-1])
+		}
+		status = strings.Join(names, ", ")
+	}
+	msg := fmt.Sprintf("Рабочие дни для %q: %s\nНажмите день чтобы включить/выключить:", org.Name, status)
+	return msg, kb
+}
+
+func (b *Bot) handleCallback(ctx context.Context, upd *schemes.MessageCallbackUpdate) {
+	payload := upd.Callback.Payload
+	userID := upd.Callback.User.UserId
+
+	if !b.cfg.IsAdmin(userID) {
+		return
+	}
+
+	// Обработка wd:<org_id>:<day>
+	if strings.HasPrefix(payload, "wd:") {
+		var orgID int64
+		var day int
+		if _, err := fmt.Sscanf(payload, "wd:%d:%d", &orgID, &day); err != nil {
+			return
+		}
+
+		added, err := b.db.ToggleOrgWorkday(orgID, day)
+		if err != nil {
+			log.Printf("[BOT] ошибка переключения рабочего дня: %v", err)
+			return
+		}
+
+		action := "удалён"
+		if added {
+			action = "добавлен"
+		}
+
+		org, err := b.db.GetOrgByID(orgID)
+		if err != nil || org == nil {
+			return
+		}
+
+		// Ответить на callback чтобы убрать индикатор загрузки
+		b.api.Messages.AnswerOnCallback(ctx, upd.Callback.CallbackID, &schemes.CallbackAnswer{})
+
+		// Уведомление + обновлённая клавиатура
+		chatID := upd.GetChatID()
+		b.send(ctx, chatID, fmt.Sprintf("%s %s для %q.", weekdays[day-1], action, org.Name))
+		msg, kb := b.buildWorkdaysMessage(org)
+		if err := b.api.Messages.Send(ctx, maxbot.NewMessage().SetChat(chatID).SetText(msg).AddKeyboard(kb)); err != nil {
+			log.Printf("[BOT] ошибка обновления workdays: %v", err)
+		}
+	}
+}
+
+func (b *Bot) cmdVersion(ctx context.Context, chatID int64) {
+	latest, err := updater.CheckLatestVersion(ctx)
+	if err != nil {
+		b.send(ctx, chatID, fmt.Sprintf("Текущая версия: %s\n⚠️ Не удалось проверить последнюю версию: %v", b.version, err))
+		return
+	}
+	if strings.TrimPrefix(latest, "v") == strings.TrimPrefix(b.version, "v") {
+		b.send(ctx, chatID, fmt.Sprintf("✅ Установлена последняя версия: %s", b.version))
+	} else {
+		b.send(ctx, chatID, fmt.Sprintf("Текущая версия: %s\n🆕 Доступна новая версия: %s\nОбновить: /update", b.version, latest))
+	}
+}
+
+func (b *Bot) cmdUpdate(ctx context.Context, chatID int64) {
+	latest, err := updater.CheckLatestVersion(ctx)
+	if err != nil {
+		b.send(ctx, chatID, fmt.Sprintf("❌ Не удалось проверить версию: %v", err))
+		return
+	}
+
+	if strings.TrimPrefix(latest, "v") == strings.TrimPrefix(b.version, "v") {
+		b.send(ctx, chatID, fmt.Sprintf("✅ Уже установлена последняя версия: %s", b.version))
+		return
+	}
+
+	b.send(ctx, chatID, fmt.Sprintf("⬇️ Скачиваю версию %s...", latest))
+
+	if err := updater.Update(ctx, b.version); err != nil {
+		b.send(ctx, chatID, fmt.Sprintf("❌ Ошибка обновления: %v", err))
+		return
+	}
+
+	b.send(ctx, chatID, fmt.Sprintf("✅ Версия %s скачана. Перезапускаюсь...", latest))
+	log.Printf("[BOT] запуск обновления до %s, завершение процесса", latest)
+	b.stop()
 }

@@ -9,24 +9,27 @@ import (
 func TestParseStatus(t *testing.T) {
 	tests := []struct {
 		name     string
+		subject  string
 		body     string
 		expected string
 	}{
-		{"english success", "Backup completed successfully", "success"},
-		{"russian success", "Резервное копирование завершено успешно", "success"},
-		{"english failure", "Backup failed with error", "failure"},
-		{"russian failure", "Произошла ошибка при резервном копировании", "failure"},
-		{"empty body", "", "failure"},
-		{"unknown text", "Some random text without keywords", "failure"},
-		{"completed keyword", "backup completed", "success"},
-		{"успешно keyword", "задание выполнено успешно", "success"},
+		{"error in subject", "Backup error - MyOrg", "", "failure"},
+		{"failure in subject", "Backup failure - MyOrg", "", "failure"},
+		{"ошибка in subject", "Ошибка резервного копирования", "", "failure"},
+		{"сбой in subject", "Сбой задания", "", "failure"},
+		{"error in body", "Backup - MyOrg", "An error occurred", "failure"},
+		{"failed in body", "Backup - MyOrg", "Task failed with code 5", "failure"},
+		{"success no keywords", "Backup - MyOrg", "Backup finished", "success"},
+		{"empty both", "", "", "success"},
+		{"unknown text", "Some subject", "Some random text", "success"},
+		{"case insensitive", "BACKUP ERROR - MyOrg", "", "failure"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := email.ParseStatus(tt.body)
+			got := email.ParseStatus(tt.subject, tt.body)
 			if got != tt.expected {
-				t.Errorf("ParseStatus(%q) = %q, want %q", tt.body, got, tt.expected)
+				t.Errorf("ParseStatus(%q, %q) = %q, want %q", tt.subject, tt.body, got, tt.expected)
 			}
 		})
 	}

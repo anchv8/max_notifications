@@ -14,6 +14,9 @@ import (
 	"max-echo-bot/internal/email"
 )
 
+// Version задаётся при сборке: go build -ldflags "-X main.Version=1.0.0"
+var Version = "dev"
+
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -44,7 +47,7 @@ func main() {
 
 	emailWorker := email.NewWorker(cfg, database, events)
 	watcher := bot.NewWatcher(database, events)
-	botRunner := bot.NewBot(api, cfg, database, events)
+	botRunner := bot.NewBot(api, cfg, database, events, emailWorker, Version)
 
 	go emailWorker.Run(ctx)
 	go watcher.Run(ctx)
