@@ -1,0 +1,532 @@
+package bot
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"strings"
+
+	maxbot "github.com/max-messenger/max-bot-api-client-go"
+	"github.com/max-messenger/max-bot-api-client-go/schemes"
+
+	"max-echo-bot/internal/config"
+	"max-echo-bot/internal/db"
+	"max-echo-bot/internal/email"
+)
+
+type Bot struct {
+	api    *maxbot.Api
+	cfg    *config.Config
+	db     *db.DB
+	events <-chan email.Event
+}
+
+func NewBot(api *maxbot.Api, cfg *config.Config, database *db.DB, events <-chan email.Event) *Bot {
+	return &Bot{api: api, cfg: cfg, db: database, events: events}
+}
+
+// Run запускает бота: обрабатывает команды и рассылает уведомления.
+func (b *Bot) Run(ctx context.Context) {
+	updates := b.api.GetUpdates(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev, ok := <-b.events:
+			if !ok {
+				return
+			}
+			b.handleEvent(ctx, ev)
+		case upd, ok := <-updates:
+			if !ok {
+				return
+			}
+			if msg, ok := upd.(*schemes.MessageCreatedUpdate); ok {
+				b.handleMessage(ctx, msg)
+			}
+		}
+	}
+}
+
+// send отправляет сообщение в чат.
+func (b *Bot) send(ctx context.Context, chatID int64, text string) {
+	if err := b.api.Messages.Send(ctx, maxbot.NewMessage().SetChat(chatID).SetText(text)); err != nil {
+		log.Printf("[BOT] ошибка отправки в chat=%d: %v", chatID, err)
+	}
+}
+
+// broadcast рассылает сообщение списку пользователей.
+func (b *Bot) broadcast(ctx context.Context, userIDs []int64, text string) {
+	for _, uid := range userIDs {
+		b.send(ctx, uid, text)
+	}
+}
+
+// handleEvent рассылает уведомление о событии бэкапа.
+func (b *Bot) handleEvent(ctx context.Context, ev email.Event) {
+	ts := ev.Event.ReceivedAt.Format("2006-01-02 15:04")
+	var text string
+	switch ev.Event.Status {
+	case "success":
+		text = fmt.Sprintf("✅ %s — успешно [%s]", ev.Event.JobName, ts)
+	case "failure":
+		text = fmt.Sprintf("❌ %s — ошибка: %s [%s]", ev.Event.JobName, ev.Event.Message, ts)
+	case "missed":
+		text = fmt.Sprintf("⚠️ %s — %s [%s]", ev.Event.JobName, ev.Event.Message, ts)
+	}
+
+	// Уведомить администратора всегда
+	recipients := []int64{b.cfg.AdminUserID}
+
+	// Если задача привязана к организации — уведомить подписчиков
+	if ev.Job.OrgID != nil {
+		subs, err := b.db.GetSubscribersForOrg(*ev.Job.OrgID)
+		if err != nil {
+			log.Printf("[BOT] ошибка получения подписчиков: %v", err)
+		}
+		for _, u := range subs {
+			if u.ID != b.cfg.AdminUserID {
+				recipients = append(recipients, u.ID)
+			}
+		}
+	}
+
+	b.broadcast(ctx, recipients, text)
+
+	// Уведомить администратора о новой задаче
+	if ev.IsNewJob {
+		b.send(ctx, b.cfg.AdminUserID, fmt.Sprintf(
+			"⚙️ Новая задача зарегистрирована: %q. Привяжите её к организации:\n/setorg \"%s\" <org_name>",
+			ev.Job.JobName, ev.Job.JobName,
+		))
+	}
+}
+
+// handleMessage маршрутизирует входящее сообщение к нужному обработчику.
+func (b *Bot) handleMessage(ctx context.Context, upd *schemes.MessageCreatedUpdate) {
+	userID := upd.Message.Sender.UserId
+	chatID := upd.Message.Recipient.ChatId
+	name := upd.Message.Sender.Name
+	username := upd.Message.Sender.Username
+	text := strings.TrimSpace(upd.Message.Body.Text)
+
+	log.Printf("[BOT] userId=%d text=%q", userID, text)
+
+	parts := strings.Fields(text)
+	if len(parts) == 0 {
+		return
+	}
+	cmd := strings.ToLower(parts[0])
+
+	// Публичные команды
+	switch cmd {
+	case "/start":
+		b.send(ctx, chatID, "Привет! Отправь /invite чтобы запросить доступ.")
+		return
+	case "/invite":
+		b.cmdInvite(ctx, chatID, userID, name, username)
+		return
+	}
+
+	// Проверка что пользователь активен
+	user, err := b.db.GetUser(userID)
+	if err != nil {
+		log.Printf("[BOT] ошибка получения пользователя %d: %v", userID, err)
+		return
+	}
+	if user == nil || user.Status != "active" {
+		b.send(ctx, chatID, "У вас нет доступа. Отправьте /invite для запроса.")
+		return
+	}
+
+	// Команды для активных пользователей
+	switch cmd {
+	case "/stats":
+		b.cmdStats(ctx, chatID, userID)
+	case "/last":
+		b.cmdLast(ctx, chatID, userID)
+	case "/myorgs":
+		b.cmdMyOrgs(ctx, chatID, userID)
+	case "/subscribe":
+		if len(parts) < 2 {
+			b.send(ctx, chatID, "Использование: /subscribe <org_name>")
+			return
+		}
+		b.cmdSubscribe(ctx, chatID, userID, strings.Join(parts[1:], " "))
+	case "/unsubscribe":
+		if len(parts) < 2 {
+			b.send(ctx, chatID, "Использование: /unsubscribe <org_name>")
+			return
+		}
+		b.cmdUnsubscribe(ctx, chatID, userID, strings.Join(parts[1:], " "))
+	default:
+		// Проверяем команды администратора
+		if userID != b.cfg.AdminUserID {
+			b.send(ctx, chatID, "Неизвестная команда.")
+			return
+		}
+		b.handleAdminCmd(ctx, chatID, cmd, parts)
+	}
+}
+
+func (b *Bot) handleAdminCmd(ctx context.Context, chatID int64, cmd string, parts []string) {
+	switch cmd {
+	case "/pending":
+		b.cmdPending(ctx, chatID)
+	case "/approve":
+		if len(parts) < 2 {
+			b.send(ctx, chatID, "Использование: /approve <user_id>")
+			return
+		}
+		b.cmdApproveReject(ctx, chatID, parts[1], "active")
+	case "/reject":
+		if len(parts) < 2 {
+			b.send(ctx, chatID, "Использование: /reject <user_id>")
+			return
+		}
+		b.cmdApproveReject(ctx, chatID, parts[1], "rejected")
+	case "/users":
+		b.cmdUsers(ctx, chatID)
+	case "/orgs":
+		b.cmdOrgs(ctx, chatID)
+	case "/addorg":
+		if len(parts) < 2 {
+			b.send(ctx, chatID, "Использование: /addorg <name>")
+			return
+		}
+		b.cmdAddOrg(ctx, chatID, strings.Join(parts[1:], " "))
+	case "/setorg":
+		b.cmdSetOrg(ctx, chatID, parts)
+	default:
+		b.send(ctx, chatID, "Неизвестная команда.")
+	}
+}
+
+func (b *Bot) cmdInvite(ctx context.Context, chatID, userID int64, name, username string) {
+	existing, err := b.db.GetUser(userID)
+	if err != nil {
+		b.send(ctx, chatID, "Ошибка сервера, попробуйте позже.")
+		return
+	}
+	if existing != nil {
+		switch existing.Status {
+		case "pending":
+			b.send(ctx, chatID, "Ваша заявка уже отправлена, ожидайте подтверждения.")
+		case "active":
+			b.send(ctx, chatID, "У вас уже есть доступ.")
+		case "rejected":
+			b.send(ctx, chatID, "Ваша заявка была отклонена.")
+		}
+		return
+	}
+
+	if err := b.db.CreateUser(userID, name, username); err != nil {
+		b.send(ctx, chatID, "Ошибка сервера, попробуйте позже.")
+		return
+	}
+
+	b.send(ctx, chatID, "Заявка отправлена! Ожидайте подтверждения от администратора.")
+
+	usernameStr := ""
+	if username != "" {
+		usernameStr = " (@" + username + ")"
+	}
+	b.send(ctx, b.cfg.AdminUserID, fmt.Sprintf(
+		"👤 Новый запрос доступа: %s%s (id: %d)\n/approve %d или /reject %d",
+		name, usernameStr, userID, userID, userID,
+	))
+}
+
+func (b *Bot) cmdStats(ctx context.Context, chatID, userID int64) {
+	orgs, err := b.db.ListUserOrgs(userID)
+	if err != nil {
+		b.send(ctx, chatID, "Ошибка получения данных.")
+		return
+	}
+
+	var orgIDs []int64
+	for _, o := range orgs {
+		orgIDs = append(orgIDs, o.ID)
+	}
+
+	// Администратор видит всё
+	if userID == b.cfg.AdminUserID {
+		orgIDs = nil
+	}
+
+	stats, err := b.db.GetStats(orgIDs)
+	if err != nil {
+		b.send(ctx, chatID, "Ошибка получения статистики.")
+		return
+	}
+	if len(stats) == 0 {
+		b.send(ctx, chatID, "Нет данных. Подпишитесь на организации: /subscribe <org_name>")
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString("📊 Статистика за 7 дней:\n")
+	for _, s := range stats {
+		sb.WriteString(fmt.Sprintf("%s: ✅ %d  ❌ %d  ⚠️ %d\n", s.JobName, s.Success7, s.Failure7, s.Missed7))
+	}
+	sb.WriteString("\nЗа 30 дней:\n")
+	for _, s := range stats {
+		sb.WriteString(fmt.Sprintf("%s: ✅ %d  ❌ %d  ⚠️ %d\n", s.JobName, s.Success30, s.Failure30, s.Missed30))
+	}
+	b.send(ctx, chatID, sb.String())
+}
+
+func (b *Bot) cmdLast(ctx context.Context, chatID, userID int64) {
+	orgs, err := b.db.ListUserOrgs(userID)
+	if err != nil {
+		b.send(ctx, chatID, "Ошибка получения данных.")
+		return
+	}
+
+	var orgIDs []int64
+	for _, o := range orgs {
+		orgIDs = append(orgIDs, o.ID)
+	}
+	if userID == b.cfg.AdminUserID {
+		orgIDs = nil
+	}
+
+	events, err := b.db.GetLastEvents(orgIDs, 10)
+	if err != nil {
+		b.send(ctx, chatID, "Ошибка получения событий.")
+		return
+	}
+	if len(events) == 0 {
+		b.send(ctx, chatID, "Событий нет.")
+		return
+	}
+
+	var sb strings.Builder
+	for _, e := range events {
+		ts := e.ReceivedAt.Format("2006-01-02 15:04")
+		icon := "✅"
+		if e.Status == "failure" {
+			icon = "❌"
+		} else if e.Status == "missed" {
+			icon = "⚠️"
+		}
+		sb.WriteString(fmt.Sprintf("%s %s — %s\n", icon, e.JobName, ts))
+	}
+	b.send(ctx, chatID, sb.String())
+}
+
+func (b *Bot) cmdMyOrgs(ctx context.Context, chatID, userID int64) {
+	orgs, err := b.db.ListUserOrgs(userID)
+	if err != nil {
+		b.send(ctx, chatID, "Ошибка получения данных.")
+		return
+	}
+	if len(orgs) == 0 {
+		b.send(ctx, chatID, "Вы не подписаны ни на одну организацию.\nИспользуйте /subscribe <org_name>")
+		return
+	}
+	var sb strings.Builder
+	sb.WriteString("Ваши организации:\n")
+	for _, o := range orgs {
+		sb.WriteString("• " + o.Name + "\n")
+	}
+	b.send(ctx, chatID, sb.String())
+}
+
+func (b *Bot) cmdSubscribe(ctx context.Context, chatID, userID int64, orgName string) {
+	org, err := b.db.GetOrgByName(orgName)
+	if err != nil || org == nil {
+		b.send(ctx, chatID, fmt.Sprintf("Организация %q не найдена.", orgName))
+		return
+	}
+	if err := b.db.SubscribeUserToOrg(userID, org.ID); err != nil {
+		b.send(ctx, chatID, "Ошибка подписки.")
+		return
+	}
+	b.send(ctx, chatID, fmt.Sprintf("Вы подписались на %q.", orgName))
+}
+
+func (b *Bot) cmdUnsubscribe(ctx context.Context, chatID, userID int64, orgName string) {
+	org, err := b.db.GetOrgByName(orgName)
+	if err != nil || org == nil {
+		b.send(ctx, chatID, fmt.Sprintf("Организация %q не найдена.", orgName))
+		return
+	}
+	if err := b.db.UnsubscribeUserFromOrg(userID, org.ID); err != nil {
+		b.send(ctx, chatID, "Ошибка отписки.")
+		return
+	}
+	b.send(ctx, chatID, fmt.Sprintf("Вы отписались от %q.", orgName))
+}
+
+func (b *Bot) cmdPending(ctx context.Context, chatID int64) {
+	users, err := b.db.ListUsersByStatus("pending")
+	if err != nil {
+		b.send(ctx, chatID, "Ошибка получения данных.")
+		return
+	}
+	if len(users) == 0 {
+		b.send(ctx, chatID, "Нет ожидающих заявок.")
+		return
+	}
+	var sb strings.Builder
+	sb.WriteString("Ожидающие заявки:\n")
+	for _, u := range users {
+		uname := ""
+		if u.Username != "" {
+			uname = " (@" + u.Username + ")"
+		}
+		sb.WriteString(fmt.Sprintf("• %s%s (id: %d) — /approve %d | /reject %d\n",
+			u.Name, uname, u.ID, u.ID, u.ID))
+	}
+	b.send(ctx, chatID, sb.String())
+}
+
+func (b *Bot) cmdApproveReject(ctx context.Context, chatID int64, userIDStr, status string) {
+	var targetID int64
+	if _, err := fmt.Sscanf(userIDStr, "%d", &targetID); err != nil {
+		b.send(ctx, chatID, "Неверный user_id.")
+		return
+	}
+	user, err := b.db.GetUser(targetID)
+	if err != nil || user == nil {
+		b.send(ctx, chatID, "Пользователь не найден.")
+		return
+	}
+	if err := b.db.SetUserStatus(targetID, status); err != nil {
+		b.send(ctx, chatID, "Ошибка обновления статуса.")
+		return
+	}
+	action := "подтверждён"
+	userNotif := "Ваша заявка одобрена! Теперь вы можете получать уведомления.\nПодпишитесь на организации: /subscribe <org_name>"
+	if status == "rejected" {
+		action = "отклонён"
+		userNotif = "Ваша заявка была отклонена."
+	}
+	b.send(ctx, chatID, fmt.Sprintf("Пользователь %s %s.", user.Name, action))
+	b.send(ctx, targetID, userNotif)
+}
+
+func (b *Bot) cmdUsers(ctx context.Context, chatID int64) {
+	users, err := b.db.ListActiveUsers()
+	if err != nil {
+		b.send(ctx, chatID, "Ошибка получения данных.")
+		return
+	}
+	if len(users) == 0 {
+		b.send(ctx, chatID, "Нет активных пользователей.")
+		return
+	}
+	var sb strings.Builder
+	sb.WriteString("Активные пользователи:\n")
+	for _, u := range users {
+		orgs, _ := b.db.ListUserOrgs(u.ID)
+		orgNames := make([]string, 0, len(orgs))
+		for _, o := range orgs {
+			orgNames = append(orgNames, o.Name)
+		}
+		orgStr := "нет подписок"
+		if len(orgNames) > 0 {
+			orgStr = strings.Join(orgNames, ", ")
+		}
+		uname := ""
+		if u.Username != "" {
+			uname = " (@" + u.Username + ")"
+		}
+		sb.WriteString(fmt.Sprintf("• %s%s — %s\n", u.Name, uname, orgStr))
+	}
+	b.send(ctx, chatID, sb.String())
+}
+
+func (b *Bot) cmdOrgs(ctx context.Context, chatID int64) {
+	orgs, err := b.db.ListOrgs()
+	if err != nil {
+		b.send(ctx, chatID, "Ошибка получения данных.")
+		return
+	}
+	if len(orgs) == 0 {
+		b.send(ctx, chatID, "Нет организаций. Создайте: /addorg <name>")
+		return
+	}
+	jobs, err := b.db.ListAllJobs()
+	if err != nil {
+		b.send(ctx, chatID, "Ошибка получения задач.")
+		return
+	}
+
+	jobsByOrg := make(map[int64][]string)
+	for _, j := range jobs {
+		if j.OrgID != nil {
+			jobsByOrg[*j.OrgID] = append(jobsByOrg[*j.OrgID], j.JobName)
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString("Организации:\n")
+	for _, o := range orgs {
+		jobNames := jobsByOrg[o.ID]
+		jobStr := "нет задач"
+		if len(jobNames) > 0 {
+			jobStr = strings.Join(jobNames, ", ")
+		}
+		sb.WriteString(fmt.Sprintf("• %s — %s\n", o.Name, jobStr))
+	}
+
+	var unassigned []string
+	for _, j := range jobs {
+		if j.OrgID == nil {
+			unassigned = append(unassigned, j.JobName)
+		}
+	}
+	if len(unassigned) > 0 {
+		sb.WriteString("\nБез организации:\n")
+		for _, name := range unassigned {
+			sb.WriteString("• " + name + "\n")
+		}
+	}
+	b.send(ctx, chatID, sb.String())
+}
+
+func (b *Bot) cmdAddOrg(ctx context.Context, chatID int64, name string) {
+	if err := b.db.CreateOrg(name); err != nil {
+		b.send(ctx, chatID, fmt.Sprintf("Ошибка создания организации (возможно, уже существует): %v", err))
+		return
+	}
+	b.send(ctx, chatID, fmt.Sprintf("Организация %q создана.", name))
+}
+
+func (b *Bot) cmdSetOrg(ctx context.Context, chatID int64, parts []string) {
+	// Синтаксис: /setorg "job name" org_name
+	// или: /setorg job_name org_name (если без пробелов)
+	raw := strings.Join(parts[1:], " ")
+	var jobName, orgName string
+
+	if strings.HasPrefix(raw, `"`) {
+		end := strings.Index(raw[1:], `"`)
+		if end < 0 {
+			b.send(ctx, chatID, `Использование: /setorg "название задачи" название_орг`)
+			return
+		}
+		jobName = raw[1 : end+1]
+		orgName = strings.TrimSpace(raw[end+2:])
+	} else {
+		fields := strings.Fields(raw)
+		if len(fields) < 2 {
+			b.send(ctx, chatID, `Использование: /setorg "название задачи" название_орг`)
+			return
+		}
+		jobName = fields[0]
+		orgName = strings.Join(fields[1:], " ")
+	}
+
+	org, err := b.db.GetOrgByName(orgName)
+	if err != nil || org == nil {
+		b.send(ctx, chatID, fmt.Sprintf("Организация %q не найдена.", orgName))
+		return
+	}
+	if err := b.db.SetJobOrg(jobName, org.ID); err != nil {
+		b.send(ctx, chatID, "Ошибка привязки задачи.")
+		return
+	}
+	b.send(ctx, chatID, fmt.Sprintf("Задача %q привязана к организации %q.", jobName, orgName))
+}
