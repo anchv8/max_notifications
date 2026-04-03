@@ -22,6 +22,7 @@ type Config struct {
 	EmailPollInterval int // минуты
 	DBPath            string
 	DBBackupTime      string    // "15:04", пусто — не отправлять автоматически
+	ReportTime        string    // "15:04", пусто — не отправлять автоматически
 	Location          *time.Location
 }
 
@@ -56,6 +57,7 @@ func Load() (*Config, error) {
 		EmailPollInterval: pollInterval,
 		DBPath:            os.Getenv("DB_PATH"),
 		DBBackupTime:      os.Getenv("DB_BACKUP_TIME"),
+		ReportTime:        os.Getenv("REPORT_TIME"),
 	}
 
 	if cfg.BotToken == "" {
@@ -97,6 +99,12 @@ func Load() (*Config, error) {
 	if cfg.DBBackupTime != "" {
 		if _, err := time.ParseInLocation("15:04", cfg.DBBackupTime, cfg.Location); err != nil {
 			return nil, fmt.Errorf("DB_BACKUP_TIME %q невалидный, ожидается HH:MM: %w", cfg.DBBackupTime, err)
+		}
+	}
+
+	if cfg.ReportTime != "" {
+		if _, err := time.ParseInLocation("15:04", cfg.ReportTime, cfg.Location); err != nil {
+			return nil, fmt.Errorf("REPORT_TIME %q невалидный, ожидается HH:MM: %w", cfg.ReportTime, err)
 		}
 	}
 
