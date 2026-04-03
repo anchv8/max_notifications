@@ -103,6 +103,11 @@ func (d *DB) migrate() error {
 			day    INTEGER NOT NULL CHECK(day >= 1 AND day <= 7),
 			PRIMARY KEY (org_id, day)
 		);
+		CREATE TABLE IF NOT EXISTS job_workdays (
+			job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+			day    INTEGER NOT NULL CHECK(day >= 1 AND day <= 7),
+			PRIMARY KEY (job_id, day)
+		);
 	`)
 	return err
 }
@@ -634,6 +639,68 @@ func (d *DB) IsWorkday(orgID int64) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// GetJobWorkdays возвращает список рабочих дней для задания (1=Пн, 7=Вс).
+func (d *DB) GetJobWorkdays(jobID int64) ([]int, error) {
+	rows, err := d.conn.Query(`SELECT day FROM job_workdays WHERE job_id = ? ORDER BY day`, jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var days []int
+	for rows.Next() {
+		var day int
+		if err := rows.Scan(&day); err != nil {
+			return nil, err
+		}
+		days = append(days, day)
+	}
+	return days, rows.Err()
+}
+
+// ToggleJobWorkday переключает рабочий день для задания.
+// Возвращает true если день добавлен, false если удалён.
+func (d *DB) ToggleJobWorkday(jobID int64, day int) (bool, error) {
+	var count int
+	err := d.conn.QueryRow(`SELECT COUNT(*) FROM job_workdays WHERE job_id = ? AND day = ?`, jobID, day).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	if count > 0 {
+		_, err = d.conn.Exec(`DELETE FROM job_workdays WHERE job_id = ? AND day = ?`, jobID, day)
+		return false, err
+	}
+	_, err = d.conn.Exec(`INSERT INTO job_workdays (job_id, day) VALUES (?, ?)`, jobID, day)
+	return true, err
+}
+
+// IsJobWorkday возвращает true если для задания сегодня рабочий день.
+// Если рабочие дни не заданы — возвращает true (каждый день рабочий).
+func (d *DB) IsJobWorkday(jobID int64) (bool, error) {
+	days, err := d.GetJobWorkdays(jobID)
+	if err != nil {
+		return false, err
+	}
+	if len(days) == 0 {
+		return true, nil
+	}
+	today := int(time.Now().Weekday())
+	if today == 0 {
+		today = 7
+	}
+	for _, d := range days {
+		if d == today {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// DeleteJob удаляет задание по ID. job_workdays удаляются каскадно.
+func (d *DB) DeleteJob(jobID int64) error {
+	_, err := d.conn.Exec(`DELETE FROM jobs WHERE id = ?`, jobID)
+	return err
 }
 
 // --- Events ---

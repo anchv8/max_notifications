@@ -195,3 +195,75 @@ func TestGetLastEvents(t *testing.T) {
 		t.Errorf("первое событие: got %q want failure", events[0].Status)
 	}
 }
+
+func TestJobWorkdays(t *testing.T) {
+	d := openTestDB(t)
+
+	job, _, _ := d.GetOrCreateJob("TestJob")
+
+	// Изначально нет рабочих дней — IsJobWorkday должен вернуть true (каждый день рабочий)
+	ok, err := d.IsJobWorkday(job.ID)
+	if err != nil {
+		t.Fatalf("IsJobWorkday: %v", err)
+	}
+	if !ok {
+		t.Error("без настроенных дней IsJobWorkday должен возвращать true")
+	}
+
+	// Добавить понедельник (1)
+	added, err := d.ToggleJobWorkday(job.ID, 1)
+	if err != nil {
+		t.Fatalf("ToggleJobWorkday add: %v", err)
+	}
+	if !added {
+		t.Error("первый toggle должен добавить день")
+	}
+
+	days, err := d.GetJobWorkdays(job.ID)
+	if err != nil {
+		t.Fatalf("GetJobWorkdays: %v", err)
+	}
+	if len(days) != 1 || days[0] != 1 {
+		t.Errorf("GetJobWorkdays: got %v, want [1]", days)
+	}
+
+	// Удалить понедельник
+	added, err = d.ToggleJobWorkday(job.ID, 1)
+	if err != nil {
+		t.Fatalf("ToggleJobWorkday remove: %v", err)
+	}
+	if added {
+		t.Error("второй toggle должен удалить день")
+	}
+
+	days, _ = d.GetJobWorkdays(job.ID)
+	if len(days) != 0 {
+		t.Errorf("после удаления дней должно быть 0, got %v", days)
+	}
+}
+
+func TestJobWorkdaysCascadeDelete(t *testing.T) {
+	d := openTestDB(t)
+
+	job, _, _ := d.GetOrCreateJob("CascadeJob")
+	_, _ = d.ToggleJobWorkday(job.ID, 2)
+	_, _ = d.ToggleJobWorkday(job.ID, 3)
+
+	days, _ := d.GetJobWorkdays(job.ID)
+	if len(days) != 2 {
+		t.Fatalf("ожидалось 2 дня, got %d", len(days))
+	}
+
+	// Удалить job — дни должны удалиться каскадно
+	if err := d.DeleteJob(job.ID); err != nil {
+		t.Fatalf("DeleteJob: %v", err)
+	}
+
+	days, err := d.GetJobWorkdays(job.ID)
+	if err != nil {
+		t.Fatalf("GetJobWorkdays после удаления: %v", err)
+	}
+	if len(days) != 0 {
+		t.Errorf("после удаления job дни должны быть удалены каскадно, got %v", days)
+	}
+}
