@@ -51,6 +51,7 @@ func (b *Bot) Run(ctx context.Context) {
 	}
 
 	b.RunBackupScheduler(ctx)
+	b.RunDailyReporter(ctx)
 	b.registerCommands(ctx)
 
 	updates := b.api.GetUpdates(ctx)
@@ -219,7 +220,7 @@ func (b *Bot) handleMessage(ctx context.Context, upd *schemes.MessageCreatedUpda
 	// Команды администратора
 	if isAdmin {
 		switch cmd {
-		case "/pending", "/approve", "/reject", "/deactivate", "/users", "/orgs", "/addorg", "/setorg", "/checkmail", "/workdays", "/checkerrors", "/update", "/version", "/backupdb":
+		case "/pending", "/approve", "/reject", "/deactivate", "/users", "/orgs", "/addorg", "/setorg", "/checkmail", "/workdays", "/checkerrors", "/update", "/version", "/backupdb", "/report":
 			b.handleAdminCmd(ctx, chatID, cmd, parts)
 			return
 		}
@@ -302,6 +303,8 @@ func (b *Bot) handleAdminCmd(ctx context.Context, chatID int64, cmd string, part
 			return
 		}
 		b.cmdWorkdays(ctx, chatID, strings.Join(parts[1:], " "))
+	case "/report":
+		b.cmdReport(ctx, chatID)
 	default:
 		b.send(ctx, chatID, "Неизвестная команда.")
 	}
@@ -928,6 +931,7 @@ func (b *Bot) registerCommands(ctx context.Context) {
 		{Name: "subscribe", Description: "Подписаться на организацию"},
 		{Name: "unsubscribe", Description: "Отписаться от организации"},
 		{Name: "checkerrors", Description: "Ошибки за последние 24 часа"},
+		{Name: "report", Description: "Ежедневный отчёт о бэкапах"},
 		{Name: "checkmail", Description: "Проверить почту / события за дату"},
 		{Name: "backupdb", Description: "Отправить бэкап БД"},
 		{Name: "workdays", Description: "Настроить рабочие дни организации"},
@@ -972,6 +976,7 @@ func (b *Bot) cmdCommands(ctx context.Context, chatID int64, isAdmin bool) {
 		sb.WriteString("<code>/setorg \"&lt;job&gt;\" &lt;org&gt;</code> — привязать задачу к орг.\n")
 		sb.WriteString("<code>/workdays &lt;org&gt;</code> — настроить рабочие дни\n")
 		sb.WriteString("<code>/checkerrors</code> — ошибки за последние 24ч\n")
+		sb.WriteString("<code>/report</code> — ежедневный отчёт прямо сейчас\n")
 		sb.WriteString("<code>/checkmail</code> — проверить почту сейчас\n")
 		sb.WriteString("<code>/checkmail <дата></code> — события за дату\n")
 		sb.WriteString("<code>/backupdb</code> — отправить бэкап БД\n")
@@ -987,6 +992,10 @@ func (b *Bot) cmdBackupDB(ctx context.Context, chatID int64) {
 	go func() {
 		b.sendDBBackup(ctx, fmt.Sprintf("🗄 Бэкап БД по запросу — %s", time.Now().In(b.cfg.Location).Format("2006-01-02 15:04")))
 	}()
+}
+
+func (b *Bot) cmdReport(ctx context.Context, chatID int64) {
+	b.send(ctx, chatID, b.buildDailyReport())
 }
 
 func (b *Bot) cmdVersion(ctx context.Context, chatID int64) {
