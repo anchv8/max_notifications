@@ -23,6 +23,15 @@ func TestParseStatus(t *testing.T) {
 		{"empty both", "", "", "success"},
 		{"unknown text", "Some subject", "Some random text", "success"},
 		{"case insensitive", "BACKUP ERROR - MyOrg", "", "failure"},
+		// Уровень 1 — префиксы темы (PHP-паттерны)
+		{"php prefix: Backup ended with errors", "Backup ended with errors - MyOrg", "", "failure"},
+		{"php prefix: Backup interrupted", "Backup interrupted by user - MyOrg", "", "failure"},
+		{"php prefix: ERRORS!", "ERRORS! - MyOrg", "", "failure"},
+		{"php prefix: Ошибка!", "Ошибка! - MyOrg", "", "failure"},
+		{"php prefix: Завершено с ошибками", "Завершено с ошибками - MyOrg", "", "failure"},
+		{"php prefix: Выполнена задача (success)", "Выполнена задача USB Copy на germesnas", "", "success"},
+		// Уровень 1 не должен давать ложные срабатывания внутри строки
+		{"php prefix not at start", "OK Backup ended with errors", "", "success"},
 	}
 
 	for _, tt := range tests {
@@ -32,6 +41,26 @@ func TestParseStatus(t *testing.T) {
 				t.Errorf("ParseStatus(%q, %q) = %q, want %q", tt.subject, tt.body, got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestExtractOrgName(t *testing.T) {
+	tests := []struct {
+		subject  string
+		expected string
+	}{
+		{"1cbases - Ленком 1с", "Ленком 1с"},
+		{"Backup Server 1 - Главный офис", "Главный офис"},
+		{"bases&обмен - Советник малый 1с и обмен", "Советник малый 1с и обмен"},
+		{"NoDash", ""},
+		{"", ""},
+		{"only-one - part", "one - part"},
+	}
+	for _, tt := range tests {
+		got := email.ExtractOrgName(tt.subject)
+		if got != tt.expected {
+			t.Errorf("ExtractOrgName(%q) = %q, want %q", tt.subject, got, tt.expected)
+		}
 	}
 }
 
