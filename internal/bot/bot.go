@@ -112,6 +112,16 @@ func (b *Bot) handleEvent(ctx context.Context, ev email.Event) {
 		text = fmt.Sprintf("⚠️ <b>%s</b> — %s\n<code>%s</code>", ev.Event.JobName, ev.Event.Message, ts)
 	}
 
+	// Успешные бэкапы не рассылаются — они видны в /report
+	if ev.Event.Status == "success" {
+		if ev.IsNewJob {
+			for _, id := range b.cfg.AdminUserIDs {
+				b.sendNewJobBindMessage(ctx, id, ev.Job.JobName)
+			}
+		}
+		return
+	}
+
 	// Уведомить всех администраторов всегда
 	seen := make(map[int64]bool)
 	recipients := make([]int64, 0, len(b.cfg.AdminUserIDs))
@@ -298,11 +308,7 @@ func (b *Bot) handleAdminCmd(ctx context.Context, chatID int64, cmd string, part
 	case "/checkerrors":
 		b.cmdCheckErrors(ctx, chatID)
 	case "/workdays":
-		if len(parts) < 2 {
-			b.send(ctx, chatID, "Использование: /workdays <org_name>")
-			return
-		}
-		b.cmdWorkdays(ctx, chatID, strings.Join(parts[1:], " "))
+		b.cmdWorkdays(ctx, chatID)
 	case "/report":
 		b.cmdReport(ctx, chatID)
 	default:
@@ -748,38 +754,57 @@ func (b *Bot) cmdCheckErrors(ctx context.Context, chatID int64) {
 
 var weekdays = []string{"Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"}
 
-func (b *Bot) cmdWorkdays(ctx context.Context, chatID int64, orgName string) {
-	org, err := b.db.GetOrgByName(orgName)
-	if err != nil || org == nil {
-		b.send(ctx, chatID, fmt.Sprintf("Организация <b>%s</b> не найдена.", orgName))
-		return
-	}
-
-	msg, kb := b.buildWorkdaysMessage(org)
-	if err := b.api.Messages.Send(ctx, maxbot.NewMessage().SetChat(chatID).SetText(msg).AddKeyboard(kb)); err != nil {
-		log.Printf("[BOT] ошибка отправки workdays: %v", err)
+func (b *Bot) cmdWorkdays(ctx context.Context, chatID int64) {
+	msg, kb := b.buildJobsKeyboard()
+	if err := b.api.Messages.Send(ctx, maxbot.NewMessage().SetChat(chatID).SetText(msg).SetFormat(schemes.HTML).AddKeyboard(kb)); err != nil {
+		log.Printf("[BOT] ошибка отправки workdays jobs: %v", err)
 	}
 }
 
-func (b *Bot) buildWorkdaysMessage(org *db.Organization) (string, *maxbot.Keyboard) {
-	days, _ := b.db.GetOrgWorkdays(org.ID)
+func (b *Bot) buildJobsKeyboard() (string, *maxbot.Keyboard) {
+	jobs, err := b.db.ListAllJobs()
+	if err != nil {
+		return "Ошибка загрузки заданий.", &maxbot.Keyboard{}
+	}
+	kb := &maxbot.Keyboard{}
+	for _, j := range jobs {
+		label := j.JobName
+		days, _ := b.db.GetJobWorkdays(j.ID)
+		if len(days) > 0 {
+			names := make([]string, 0, len(days))
+			for _, d := range days {
+				names = append(names, weekdays[d-1])
+			}
+			label = fmt.Sprintf("%s [%s]", j.JobName, strings.Join(names, " "))
+		}
+		row := kb.AddRow()
+		row.AddCallback(label, schemes.DEFAULT, fmt.Sprintf("wdjob:%d", j.ID))
+	}
+	return "🗓 <b>Рабочие дни заданий:</b>\nВыберите задание:", kb
+}
+
+func (b *Bot) buildDaysKeyboard(jobID int64) (string, *maxbot.Keyboard) {
+	job, err := b.db.GetJobByID(jobID)
+	if err != nil || job == nil {
+		return "Задание не найдено.", &maxbot.Keyboard{}
+	}
+	days, _ := b.db.GetJobWorkdays(jobID)
 	active := make(map[int]bool, len(days))
 	for _, d := range days {
 		active[d] = true
 	}
-
-	allActive := len(days) == 0
 	kb := &maxbot.Keyboard{}
 	row := kb.AddRow()
 	for i, name := range weekdays {
 		dayNum := i + 1
 		label := name
-		if allActive || active[dayNum] {
+		if active[dayNum] {
 			label = "✅ " + name
 		}
-		payload := fmt.Sprintf("wd:%d:%d", org.ID, dayNum)
-		row.AddCallback(label, schemes.DEFAULT, payload)
+		row.AddCallback(label, schemes.DEFAULT, fmt.Sprintf("wdday:%d:%d", jobID, dayNum))
 	}
+	backRow := kb.AddRow()
+	backRow.AddCallback("← Назад", schemes.DEFAULT, "wdback")
 
 	status := "все дни"
 	if len(days) > 0 {
@@ -789,7 +814,7 @@ func (b *Bot) buildWorkdaysMessage(org *db.Organization) (string, *maxbot.Keyboa
 		}
 		status = strings.Join(names, ", ")
 	}
-	msg := fmt.Sprintf("🗓 <b>Рабочие дни для %s:</b>\n<code>%s</code>\nНажмите день чтобы включить/выключить:", org.Name, status)
+	msg := fmt.Sprintf("🗓 <b>Рабочие дни для %s:</b>\n<code>%s</code>\nНажмите день чтобы включить/выключить:", job.JobName, status)
 	return msg, kb
 }
 
@@ -801,39 +826,48 @@ func (b *Bot) handleCallback(ctx context.Context, upd *schemes.MessageCallbackUp
 		return
 	}
 
-	// Обработка wd:<org_id>:<day>
-	if strings.HasPrefix(payload, "wd:") {
-		var orgID int64
-		var day int
-		if _, err := fmt.Sscanf(payload, "wd:%d:%d", &orgID, &day); err != nil {
+	// wdjob:<jobID> — показать дни для job'а
+	if strings.HasPrefix(payload, "wdjob:") {
+		var jobID int64
+		if _, err := fmt.Sscanf(payload, "wdjob:%d", &jobID); err != nil {
 			return
 		}
+		b.api.Messages.AnswerOnCallback(ctx, upd.Callback.CallbackID, &schemes.CallbackAnswer{})
+		chatID := upd.GetChatID()
+		msg, kb := b.buildDaysKeyboard(jobID)
+		if err := b.api.Messages.Send(ctx, maxbot.NewMessage().SetChat(chatID).SetText(msg).SetFormat(schemes.HTML).AddKeyboard(kb)); err != nil {
+			log.Printf("[BOT] ошибка отправки days keyboard: %v", err)
+		}
+		return
+	}
 
-		added, err := b.db.ToggleOrgWorkday(orgID, day)
-		if err != nil {
+	// wdday:<jobID>:<day> — toggle дня
+	if strings.HasPrefix(payload, "wdday:") {
+		var jobID int64
+		var day int
+		if _, err := fmt.Sscanf(payload, "wdday:%d:%d", &jobID, &day); err != nil {
+			return
+		}
+		if _, err := b.db.ToggleJobWorkday(jobID, day); err != nil {
 			log.Printf("[BOT] ошибка переключения рабочего дня: %v", err)
 			return
 		}
-
-		action := "удалён"
-		if added {
-			action = "добавлен"
-		}
-
-		org, err := b.db.GetOrgByID(orgID)
-		if err != nil || org == nil {
-			return
-		}
-
-		// Ответить на callback чтобы убрать индикатор загрузки
 		b.api.Messages.AnswerOnCallback(ctx, upd.Callback.CallbackID, &schemes.CallbackAnswer{})
-
-		// Уведомление + обновлённая клавиатура
 		chatID := upd.GetChatID()
-		b.send(ctx, chatID, fmt.Sprintf("%s %s для %q.", weekdays[day-1], action, org.Name))
-		msg, kb := b.buildWorkdaysMessage(org)
-		if err := b.api.Messages.Send(ctx, maxbot.NewMessage().SetChat(chatID).SetText(msg).AddKeyboard(kb)); err != nil {
-			log.Printf("[BOT] ошибка обновления workdays: %v", err)
+		msg, kb := b.buildDaysKeyboard(jobID)
+		if err := b.api.Messages.Send(ctx, maxbot.NewMessage().SetChat(chatID).SetText(msg).SetFormat(schemes.HTML).AddKeyboard(kb)); err != nil {
+			log.Printf("[BOT] ошибка обновления days keyboard: %v", err)
+		}
+		return
+	}
+
+	// wdback — вернуться к списку job'ов
+	if payload == "wdback" {
+		b.api.Messages.AnswerOnCallback(ctx, upd.Callback.CallbackID, &schemes.CallbackAnswer{})
+		chatID := upd.GetChatID()
+		msg, kb := b.buildJobsKeyboard()
+		if err := b.api.Messages.Send(ctx, maxbot.NewMessage().SetChat(chatID).SetText(msg).SetFormat(schemes.HTML).AddKeyboard(kb)); err != nil {
+			log.Printf("[BOT] ошибка возврата к jobs keyboard: %v", err)
 		}
 		return
 	}
@@ -934,7 +968,7 @@ func (b *Bot) registerCommands(ctx context.Context) {
 		{Name: "report", Description: "Ежедневный отчёт о бэкапах"},
 		{Name: "checkmail", Description: "Проверить почту / события за дату"},
 		{Name: "backupdb", Description: "Отправить бэкап БД"},
-		{Name: "workdays", Description: "Настроить рабочие дни организации"},
+		{Name: "workdays", Description: "Настроить рабочие дни задания"},
 		{Name: "pending", Description: "Ожидающие заявки"},
 		{Name: "approve", Description: "Одобрить пользователя"},
 		{Name: "reject", Description: "Отклонить пользователя"},
@@ -974,7 +1008,7 @@ func (b *Bot) cmdCommands(ctx context.Context, chatID int64, isAdmin bool) {
 		sb.WriteString("<code>/orgs</code> — список организаций и задач\n")
 		sb.WriteString("<code>/addorg &lt;name&gt;</code> — создать организацию\n")
 		sb.WriteString("<code>/setorg \"&lt;job&gt;\" &lt;org&gt;</code> — привязать задачу к орг.\n")
-		sb.WriteString("<code>/workdays &lt;org&gt;</code> — настроить рабочие дни\n")
+		sb.WriteString("<code>/workdays</code> — настроить рабочие дни задания\n")
 		sb.WriteString("<code>/checkerrors</code> — ошибки за последние 24ч\n")
 		sb.WriteString("<code>/report</code> — ежедневный отчёт прямо сейчас\n")
 		sb.WriteString("<code>/checkmail</code> — проверить почту сейчас\n")

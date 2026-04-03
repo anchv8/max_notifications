@@ -324,6 +324,23 @@ func (d *DB) GetJobByName(jobName string) (*Job, error) {
 	return &j, nil
 }
 
+func (d *DB) GetJobByID(jobID int64) (*Job, error) {
+	row := d.conn.QueryRow(`SELECT id, job_name, org_id, last_seen_at, avg_interval_hours, registered_at FROM jobs WHERE id = ?`, jobID)
+	var j Job
+	var orgID sql.NullInt64
+	var lastSeen, avgInterval, registeredAt sql.NullString
+	if err := row.Scan(&j.ID, &j.JobName, &orgID, &lastSeen, &avgInterval, &registeredAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if orgID.Valid {
+		j.OrgID = &orgID.Int64
+	}
+	return &j, nil
+}
+
 func (d *DB) SetJobOrg(jobName string, orgID int64) error {
 	_, err := d.conn.Exec(`UPDATE jobs SET org_id = ? WHERE job_name = ?`, orgID, jobName)
 	return err
