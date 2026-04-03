@@ -665,6 +665,33 @@ func (d *DB) GetRecentErrors(hours int) ([]BackupEvent, error) {
 	return events, rows.Err()
 }
 
+// GetRecentSuccesses возвращает события со статусом success за последние N часов.
+func (d *DB) GetRecentSuccesses(hours int) ([]BackupEvent, error) {
+	rows, err := d.conn.Query(`
+		SELECT be.id, be.job_id, j.job_name, be.status, COALESCE(be.message,''), be.received_at
+		FROM backup_events be
+		JOIN jobs j ON j.id = be.job_id
+		WHERE be.status = 'success'
+		  AND (julianday('now') - julianday(be.received_at)) * 24 <= ?
+		ORDER BY be.received_at DESC
+	`, hours)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var events []BackupEvent
+	for rows.Next() {
+		var e BackupEvent
+		var receivedAt string
+		if err := rows.Scan(&e.ID, &e.JobID, &e.JobName, &e.Status, &e.Message, &receivedAt); err != nil {
+			return nil, err
+		}
+		e.ReceivedAt = parseTime(receivedAt)
+		events = append(events, e)
+	}
+	return events, rows.Err()
+}
+
 // GetEventsByDate возвращает все события за указанную дату (по received_at).
 func (d *DB) GetEventsByDate(date time.Time) ([]BackupEvent, error) {
 	dateStr := date.Format("2006-01-02")
