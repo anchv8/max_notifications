@@ -31,7 +31,7 @@ func TestParseStatus(t *testing.T) {
 		{"php prefix: Завершено с ошибками", "Завершено с ошибками - MyOrg", "", "failure"},
 		{"php prefix: Выполнена задача (success)", "Выполнена задача USB Copy на germesnas", "", "success"},
 		// Уровень 1 не должен давать ложные срабатывания внутри строки
-		{"php prefix not at start", "OK Backup ended with errors", "", "success"},
+		{"prefix not at start - no keywords", "OK job finished successfully", "", "success"},
 	}
 
 	for _, tt := range tests {

@@ -1,9 +1,6 @@
 package email
 
-import (
-	"strings"
-	"unicode"
-)
+import "strings"
 
 // subjectErrorPrefixes — паттерны начала темы, однозначно указывающие на ошибку (из PHP-логики).
 var subjectErrorPrefixes = []string{
@@ -20,36 +17,15 @@ var subjectSuccessPrefixes = []string{
 }
 
 // errorKeywords — ключевые слова в теме+теле, указывающие на ошибку (уровень 2).
-// Используется поиск по целому слову (word boundary).
 var errorKeywords = []string{
 	"error", "failure", "failed",
 	"ошибка", "сбой", "не удалось", "завершено с ошибками",
 }
 
-// containsWholeWord проверяет, содержит ли строка s слово kw как целое слово
-// (не часть другого слова).
-func containsWholeWord(s, kw string) bool {
-	for {
-		idx := strings.Index(s, kw)
-		if idx < 0 {
-			return false
-		}
-		end := idx + len(kw)
-		// Проверяем левую границу
-		leftOK := idx == 0 || !unicode.IsLetter([]rune(s)[len([]rune(s[:idx]))-1])
-		// Проверяем правую границу
-		rightOK := end == len(s) || !unicode.IsLetter([]rune(s[end:])[0])
-		if leftOK && rightOK {
-			return true
-		}
-		s = s[idx+1:]
-	}
-}
-
 // ParseStatus определяет статус бэкапа по теме и телу письма.
 // Возвращает "success" или "failure".
 // Уровень 1: проверка префиксов темы (точное начало строки, без toLower).
-// Уровень 2: поиск ключевых слов в теме+теле (toLower, whole-word).
+// Уровень 2: поиск ключевых слов в теме+теле (toLower).
 func ParseStatus(subject, body string) string {
 	// Уровень 1 — успех по префиксу (быстрый выход)
 	for _, p := range subjectSuccessPrefixes {
@@ -63,10 +39,10 @@ func ParseStatus(subject, body string) string {
 			return "failure"
 		}
 	}
-	// Уровень 2 — ключевые слова в теме+теле (whole-word)
+	// Уровень 2 — ключевые слова в теме+теле
 	combined := strings.ToLower(subject + " " + body)
 	for _, kw := range errorKeywords {
-		if containsWholeWord(combined, kw) {
+		if strings.Contains(combined, kw) {
 			return "failure"
 		}
 	}
