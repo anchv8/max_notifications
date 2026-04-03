@@ -48,7 +48,8 @@ func (w *Watcher) check(ctx context.Context) {
 		// Пропускаем если для задания сегодня нерабочий день
 		isWorkday, err := w.db.IsJobWorkday(j.ID)
 		if err != nil {
-			log.Printf("[WATCHER] ошибка проверки рабочего дня для job=%d: %v", j.ID, err)
+			log.Printf("[WATCHER] ошибка проверки рабочего дня для job=%d (%s): %v", j.ID, j.JobName, err)
+			continue
 		} else if !isWorkday {
 			log.Printf("[WATCHER] пропускаем %q — сегодня нерабочий день", j.JobName)
 			continue
