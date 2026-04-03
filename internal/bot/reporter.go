@@ -33,7 +33,11 @@ func (b *Bot) RunDailyReporter(ctx context.Context) {
 // nextReportTime вычисляет следующий момент отправки отчёта по расписанию.
 func (b *Bot) nextReportTime() time.Time {
 	now := time.Now().In(b.cfg.Location)
-	t, _ := time.ParseInLocation("15:04", b.cfg.ReportTime, b.cfg.Location)
+	t, err := time.ParseInLocation("15:04", b.cfg.ReportTime, b.cfg.Location)
+	if err != nil {
+		log.Printf("[REPORT] невалидный ReportTime %q: %v", b.cfg.ReportTime, err)
+		return now.Add(24 * time.Hour)
+	}
 	next := time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), 0, 0, b.cfg.Location)
 	if !next.After(now) {
 		next = next.Add(24 * time.Hour)
