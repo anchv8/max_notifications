@@ -764,15 +764,19 @@ func (b *Bot) cmdWorkdays(ctx context.Context, chatID int64) {
 func (b *Bot) buildJobsKeyboard() (string, *maxbot.Keyboard) {
 	jobs, err := b.db.ListAllJobs()
 	if err != nil {
+		log.Printf("[BOT] ошибка загрузки заданий: %v", err)
 		return "Ошибка загрузки заданий.", &maxbot.Keyboard{}
 	}
 	kb := &maxbot.Keyboard{}
 	for _, j := range jobs {
 		label := j.JobName
-		days, _ := b.db.GetJobWorkdays(j.ID)
-		if len(days) > 0 {
-			names := make([]string, 0, len(days))
-			for _, d := range days {
+		wdays, wdErr := b.db.GetJobWorkdays(j.ID)
+		if wdErr != nil {
+			log.Printf("[BOT] ошибка получения рабочих дней для job=%d: %v", j.ID, wdErr)
+		}
+		if len(wdays) > 0 {
+			names := make([]string, 0, len(wdays))
+			for _, d := range wdays {
 				names = append(names, weekdays[d-1])
 			}
 			label = fmt.Sprintf("%s [%s]", j.JobName, strings.Join(names, " "))
@@ -788,7 +792,10 @@ func (b *Bot) buildDaysKeyboard(jobID int64) (string, *maxbot.Keyboard) {
 	if err != nil || job == nil {
 		return "Задание не найдено.", &maxbot.Keyboard{}
 	}
-	days, _ := b.db.GetJobWorkdays(jobID)
+	days, err := b.db.GetJobWorkdays(jobID)
+	if err != nil {
+		log.Printf("[BOT] ошибка получения рабочих дней для job=%d: %v", jobID, err)
+	}
 	active := make(map[int]bool, len(days))
 	for _, d := range days {
 		active[d] = true
@@ -848,11 +855,14 @@ func (b *Bot) handleCallback(ctx context.Context, upd *schemes.MessageCallbackUp
 		if _, err := fmt.Sscanf(payload, "wdday:%d:%d", &jobID, &day); err != nil {
 			return
 		}
+		if day < 1 || day > 7 {
+			return
+		}
+		b.api.Messages.AnswerOnCallback(ctx, upd.Callback.CallbackID, &schemes.CallbackAnswer{})
 		if _, err := b.db.ToggleJobWorkday(jobID, day); err != nil {
 			log.Printf("[BOT] ошибка переключения рабочего дня: %v", err)
 			return
 		}
-		b.api.Messages.AnswerOnCallback(ctx, upd.Callback.CallbackID, &schemes.CallbackAnswer{})
 		chatID := upd.GetChatID()
 		msg, kb := b.buildDaysKeyboard(jobID)
 		if err := b.api.Messages.Send(ctx, maxbot.NewMessage().SetChat(chatID).SetText(msg).SetFormat(schemes.HTML).AddKeyboard(kb)); err != nil {
